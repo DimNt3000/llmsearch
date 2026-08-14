@@ -1,0 +1,3 @@
+# The engine itself is stdlib-only. These enable the extras:
+anthropic        # LLM features via the Anthropic API (or use the claude CLI fallback)
+ddgs             # reliable DuckDuckGo web search (optional; HTML fallback exists)
