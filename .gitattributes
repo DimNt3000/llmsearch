@@ -1,0 +1,10 @@
+# Store every text file with LF in the repository, and check it out with LF
+# too, so line endings stay identical across Windows, macOS, and Linux.
+* text=auto eol=lf
+
+# Binary files Git must never touch.
+*.db binary
+*.png binary
+*.jpg binary
+*.pdf binary
+*.zip binary
