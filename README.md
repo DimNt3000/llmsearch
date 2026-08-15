@@ -9,6 +9,7 @@ with Claude layered on top for query expansion, reranking, and cited answers.
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![Core dependencies](https://img.shields.io/badge/core%20dependencies-0-success)
+![Tests](https://img.shields.io/badge/tests-86%20checks-success)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 
@@ -200,12 +201,25 @@ The parts that took the real work, and the reasoning behind them:
 
 ## Testing
 
-Validated by an offline harness of 79 functional checks, all passing, covering
-indexing and re-indexing, BM25 properties (rare terms outrank common ones, length
-normalization behaves), chunking edge cases, Unicode handling, the backend
-resolution matrix, LLM fail-open behavior, config coercion, exit codes across every
-subcommand, concurrent readers, and packaging consistency. Live paths were exercised
-end to end against real sites and a real model.
+```bash
+python tests/test_e2e.py
+```
+
+[`tests/test_e2e.py`](tests/test_e2e.py) runs 86 functional checks and exits non-zero
+on failure, so it doubles as a CI gate. It makes **no network and no LLM calls**, which
+keeps it fast and free, and it never touches your index or settings: everything runs
+against a temporary directory that is cleaned up afterwards.
+
+What it covers: indexing and re-indexing, BM25 properties (rare terms outrank common
+ones, length normalization behaves), chunking edge cases including the regression where
+a misconfigured overlap could stall the splitter, Unicode handling, backend resolution
+across every configuration, LLM fail-open behavior against deliberately malformed model
+output, terminal-escape sanitization against a hostile page, `.env` encoding traps, exit
+codes for every subcommand, concurrent readers, and packaging consistency. Checks that
+need something absent from the machine report as skipped rather than failing.
+
+The live paths, crawling real sites and answering with a real model, were exercised
+manually end to end.
 
 ## Configuration
 
