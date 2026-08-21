@@ -9,9 +9,7 @@ with Claude layered on top for query expansion, reranking, and cited answers.
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![Core dependencies](https://img.shields.io/badge/core%20dependencies-0-success)
-<!-- After the first push, swap this static badge for the live CI one:
-     ![Tests](https://github.com/USERNAME/llmsearch/actions/workflows/tests.yml/badge.svg) -->
-![Tests](https://img.shields.io/badge/tests-86%20checks-success)
+[![Tests](https://github.com/DimNt3000/llmsearch/actions/workflows/tests.yml/badge.svg)](https://github.com/DimNt3000/llmsearch/actions/workflows/tests.yml)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 
@@ -125,7 +123,7 @@ from the official Python.org site [3].
 ## Quickstart
 
 ```bash
-git clone https://github.com/<username>/llmsearch.git
+git clone https://github.com/DimNt3000/llmsearch.git
 cd llmsearch
 python run.py add samples          # index the bundled documents
 python run.py search "inverted index"
