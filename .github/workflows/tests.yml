@@ -1,0 +1,51 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  harness:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.10', '3.11', '3.12', '3.13']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      # Nothing is installed on purpose. The crawler, index, and ranking are
+      # standard library only, so a green run here also proves that claim.
+      - name: Run the end-to-end harness
+        run: python tests/test_e2e.py
+
+  harness-with-extras:
+    name: with optional dependencies
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install the optional LLM and web-search layers
+        run: python -m pip install --upgrade pip anthropic ddgs
+
+      # With anthropic importable, the API-backend checks run for real
+      # instead of reporting as skipped. Still no network or model calls.
+      - name: Run the end-to-end harness
+        run: python tests/test_e2e.py

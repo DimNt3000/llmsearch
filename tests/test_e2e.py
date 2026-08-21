@@ -439,7 +439,7 @@ def t_packaging():
     import llmsearch
     try:
         import tomllib
-    except ModuleNotFoundError:
+    except ImportError:  # tomllib landed in 3.11
         skip("pyproject: entry point and version", "tomllib requires Python 3.11+")
         tomllib = None
     if tomllib is not None:

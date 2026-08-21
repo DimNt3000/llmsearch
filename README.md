@@ -9,6 +9,8 @@ with Claude layered on top for query expansion, reranking, and cited answers.
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![Core dependencies](https://img.shields.io/badge/core%20dependencies-0-success)
+<!-- After the first push, swap this static badge for the live CI one:
+     ![Tests](https://github.com/USERNAME/llmsearch/actions/workflows/tests.yml/badge.svg) -->
 ![Tests](https://img.shields.io/badge/tests-86%20checks-success)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
@@ -217,6 +219,11 @@ across every configuration, LLM fail-open behavior against deliberately malforme
 output, terminal-escape sanitization against a hostile page, `.env` encoding traps, exit
 codes for every subcommand, concurrent readers, and packaging consistency. Checks that
 need something absent from the machine report as skipped rather than failing.
+
+The same harness runs in CI on Ubuntu and Windows across Python 3.10 through 3.13,
+once with nothing installed (which is what proves the zero-dependency claim) and once
+with the optional layers present. See
+[`.github/workflows/tests.yml`](.github/workflows/tests.yml).
 
 The live paths, crawling real sites and answering with a real model, were exercised
 manually end to end.
