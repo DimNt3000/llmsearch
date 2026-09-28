@@ -15,10 +15,12 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlparse
 
 
 class LLMError(Exception):
@@ -147,11 +149,53 @@ def _api_call(client, kwargs: dict, stream_to: StreamFn | None, beta: bool) -> s
 # Claude Code CLI backend
 # --------------------------------------------------------------------------
 
+def _claude_base_url() -> str | None:
+    """The API base URL a `claude` subprocess will use, when one is overridden.
+
+    Claude Code applies the `env` block of ~/.claude/settings.json over the
+    process environment, so that file wins when both are set.
+    """
+    try:
+        settings = json.loads(
+            (Path.home() / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        url = (settings.get("env") or {}).get("ANTHROPIC_BASE_URL")
+        if url:
+            return str(url)
+    except (OSError, ValueError, AttributeError):
+        pass
+    return os.environ.get("ANTHROPIC_BASE_URL") or None
+
+
+def _dead_local_proxy(url: str | None) -> bool:
+    """True when `url` points at this machine and nothing is listening there.
+
+    A stopped local proxy makes the claude CLI retry for minutes before it
+    gives up; one refused connection answers the same question instantly.
+    """
+    if not url:
+        return False
+    parts = urlparse(url)
+    if parts.hostname not in ("127.0.0.1", "localhost", "::1"):
+        return False
+    try:
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+        with socket.create_connection((parts.hostname, port), timeout=1):
+            return False
+    except (OSError, ValueError):
+        return True
+
+
 def _cli_complete(system: str, prompt: str, cfg: dict,
                   stream_to: StreamFn | None) -> str:
     exe = shutil.which("claude")
     if not exe:
         raise LLMUnavailable(_SETUP_HINT)
+    base_url = _claude_base_url()
+    if _dead_local_proxy(base_url):
+        raise LLMUnavailable(
+            f"The claude CLI sends its requests through {base_url}, but nothing is "
+            "listening there. Start that proxy, or remove ANTHROPIC_BASE_URL from "
+            "~/.claude/settings.json.")
     full_prompt = f"{system}\n\n---\n\n{prompt}" if system else prompt
     try:
         proc = subprocess.run(
@@ -169,8 +213,9 @@ def _cli_complete(system: str, prompt: str, cfg: dict,
         raise LLMUnavailable(f"could not run the claude CLI: {exc}\n{_SETUP_HINT}") from exc
 
     if proc.returncode != 0:
-        stderr = (proc.stderr or "").strip() or "unknown error"
-        raise LLMError(f"claude CLI failed (exit {proc.returncode}): {stderr[:400]}")
+        # In print mode the CLI often reports API errors on stdout, not stderr.
+        detail = (proc.stderr or "").strip() or (proc.stdout or "").strip() or "no output"
+        raise LLMError(f"claude CLI failed (exit {proc.returncode}): {detail[-400:]}")
     result = (proc.stdout or "").strip()
     if not result:
         raise LLMError("claude CLI returned no output")

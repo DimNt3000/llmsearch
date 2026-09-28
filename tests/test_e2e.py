@@ -309,6 +309,61 @@ def t_fail_open():
 T("fail_open", t_fail_open)
 
 
+def t_cli_backend_errors():
+    """The claude CLI backend must fail fast and say why."""
+    import socket
+    closed = socket.socket()
+    closed.bind(("127.0.0.1", 0))
+    dead_port = closed.getsockname()[1]
+    closed.close()  # nothing listens on this port any more
+    listening = socket.socket()
+    listening.bind(("127.0.0.1", 0))
+    listening.listen(1)
+    live_port = listening.getsockname()[1]
+    try:
+        check("proxy check: no override is fine", llm._dead_local_proxy(None) is False)
+        check("proxy check: remote URLs are never probed",
+              llm._dead_local_proxy("https://api.anthropic.com") is False)
+        check("proxy check: a stopped local proxy is detected",
+              llm._dead_local_proxy(f"http://127.0.0.1:{dead_port}") is True)
+        check("proxy check: a running local proxy is accepted",
+              llm._dead_local_proxy(f"http://127.0.0.1:{live_port}") is False)
+    finally:
+        listening.close()
+
+    real = (llm.shutil.which, llm.subprocess.run, llm._claude_base_url)
+    calls: list[int] = []
+    try:
+        llm.shutil.which = lambda name: "claude"  # pretend the CLI is installed
+        llm._claude_base_url = lambda: f"http://127.0.0.1:{dead_port}"
+        llm.subprocess.run = lambda *a, **k: calls.append(1)
+        t0 = time.time()
+        try:
+            llm._cli_complete("sys", "hi", dict(config.DEFAULTS), None)
+            outcome = "no error"
+        except llm.LLMUnavailable as exc:
+            outcome = str(exc)
+        # Regression: a stopped proxy used to cost ~200 s of CLI retries.
+        check("dead proxy -> LLMUnavailable in seconds, CLI never started",
+              "nothing is listening" in outcome and not calls and time.time() - t0 < 5,
+              f"{outcome} calls={calls}")
+
+        llm._claude_base_url = lambda: None
+        llm.subprocess.run = lambda *a, **k: subprocess.CompletedProcess(
+            a, 1, stdout="API Error: Connection error.", stderr="")
+        try:
+            llm._cli_complete("sys", "hi", dict(config.DEFAULTS), None)
+            outcome = "no error"
+        except llm.LLMError as exc:
+            outcome = str(exc)
+        # Regression: this used to report "unknown error" and drop the real message.
+        check("CLI failure surfaces the error it printed on stdout",
+              "Connection error" in outcome, outcome)
+    finally:
+        llm.shutil.which, llm.subprocess.run, llm._claude_base_url = real
+T("cli_backend_errors", t_cli_backend_errors)
+
+
 # ---------------------------------------------------------------- 5. retrieval internals
 def t_chunking():
     text = "word " * 2000  # a single 10,000-char paragraph, no blank lines
