@@ -278,8 +278,10 @@ def t_backend_matrix():
                 "os.environ['ANTHROPIC_API_KEY']='sk-test-fake'; "
                 "import llmsearch.llm as llm, llmsearch.config as c; "
                 "print(llm.resolve_backend({**c.DEFAULTS, 'backend': 'auto'}))" % PROJECT)
+        # A cold `import anthropic` takes a few seconds, but it passed 30 on a
+        # machine busy with a native build; the check is about behavior, not speed.
         r = subprocess.run([sys.executable, "-c", code], capture_output=True,
-                           text=True, timeout=30)
+                           text=True, timeout=120)
         check("resolve_backend auto prefers the API when a key exists",
               r.stdout.strip() == "api", r.stdout + r.stderr)
     else:
