@@ -26,10 +26,13 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
-      # Nothing is installed on purpose. The crawler, index, and ranking are
-      # standard library only, so a green run here also proves that claim.
+      # Nothing is installed on purpose. The crawler, index, ranking, and the
+      # API server are standard library only, so a green run proves that claim.
       - name: Run the end-to-end harness
         run: python tests/test_e2e.py
+
+      - name: Run the API server harness
+        run: python tests/test_server.py
 
   harness-with-extras:
     name: with optional dependencies
@@ -49,3 +52,6 @@ jobs:
       # instead of reporting as skipped. Still no network or model calls.
       - name: Run the end-to-end harness
         run: python tests/test_e2e.py
+
+      - name: Run the API server harness
+        run: python tests/test_server.py

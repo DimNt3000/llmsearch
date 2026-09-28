@@ -209,7 +209,7 @@ def t_exitcodes():
     check("unknown command -> exit 2", run_cli(["frobnicate"], SCRATCH / "db2").returncode == 2)
     check("search without query -> exit 2", run_cli(["search"], SCRATCH / "db2").returncode == 2)
     check("--help -> exit 0", run_cli(["--help"], SCRATCH / "db2").returncode == 0)
-    for sub in ("crawl", "add", "search", "ask", "summarize", "web", "stats", "config"):
+    for sub in ("crawl", "add", "search", "ask", "summarize", "web", "serve", "stats", "config"):
         check(f"{sub} --help -> exit 0", run_cli([sub, "--help"], SCRATCH / "db2").returncode == 0)
     r = run_cli(["add", str(SCRATCH / "nope-missing")], SCRATCH / "db2")
     check("add on a missing path -> clean exit 1",

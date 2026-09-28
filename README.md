@@ -27,6 +27,9 @@ The retrieval core, roughly 1,400 lines across the package, uses **only the Pyth
 standard library**. `pip install` is optional and unlocks just the LLM and live web
 search layers.
 
+A [companion mobile app](https://github.com/DimNt3000/llmsearch-mobile) (React
+Native, TypeScript) searches, asks, and crawls from a phone through `llmsearch serve`.
+
 ## Demo
 
 Ask a question and get a grounded answer, not a guess:
@@ -103,6 +106,8 @@ from the official Python.org site [3].
 | [`indexer.py`](llmsearch/indexer.py) | Chunking, tokenization, SQLite inverted index, BM25 scoring, reciprocal rank fusion, snippets |
 | [`llm.py`](llmsearch/llm.py) | Backend resolution and the four LLM capabilities, each degrading safely on failure |
 | [`websearch.py`](llmsearch/websearch.py) | DuckDuckGo results, normalized across two independent backends |
+| [`service.py`](llmsearch/service.py) | The search, ask, summarize, web, and crawl pipelines, shared by CLI and server |
+| [`server.py`](llmsearch/server.py) | `llmsearch serve`: JSON API, token auth, input validation, background crawl jobs |
 | [`config.py`](llmsearch/config.py) | Layered defaults, `config.json`, `.env` loading |
 | [`cli.py`](llmsearch/cli.py) | Argument parsing, colored output, error handling, output sanitization |
 
@@ -118,6 +123,7 @@ from the official Python.org site [3].
 | `ask QUESTION` | Retrieval-augmented answer with `[n]` citations | yes |
 | `summarize QUERY` | Digest of what the top results collectively say | yes |
 | `web QUERY [--ask]` | Live DuckDuckGo search, optionally answered from page content | `--ask` only |
+| `serve [--host] [--port] [--new-token]` | JSON API for the mobile app, see below | for LLM endpoints |
 | `stats` / `config` | Index statistics, active backend, and every tunable setting | no |
 
 ## Quickstart
@@ -134,6 +140,46 @@ Nothing to install for the retrieval half. `pip install anthropic` enables the L
 layer (or reuse an existing Claude Code login, see below), `pip install ddgs` makes
 live web search more robust, and `pip install -e .` gives you a global `llmsearch`
 command.
+
+## HTTP API and mobile app
+
+`llmsearch serve` exposes the whole engine as a small JSON API, which the companion
+[mobile app](https://github.com/DimNt3000/llmsearch-mobile) uses to search, ask, and
+crawl from a phone. It is built on the standard
+library's `http.server`, so serving adds no dependencies, and it runs the exact same
+pipeline as the CLI through a shared service layer.
+
+```console
+$ llmsearch serve
+llmsearch server v0.2.0
+  Local:    http://127.0.0.1:8765
+  Network:  http://192.168.1.42:8765   <- enter this in the app
+  Token:    (a random 24-character token)
+```
+
+Every endpoint except `/api/health` requires `Authorization: Bearer <token>`. The token
+is generated once and stored in the data directory, so a paired phone survives server
+restarts; `serve --new-token` rotates it.
+
+| Endpoint | Input | Returns |
+|---|---|---|
+| `GET /api/health` | | Liveness and version, no token needed |
+| `GET /api/stats` | | Index size and the active LLM backend |
+| `GET /api/search` | `q`, `smart=1`, `rerank=1` | Ranked results with snippets and full chunk text |
+| `POST /api/ask` | `{"question", "smart"}` | Cited answer plus the numbered sources |
+| `POST /api/summarize` | `{"query"}` | Digest plus sources |
+| `GET /api/web` | `q`, `n` | Live DuckDuckGo results |
+| `POST /api/web/ask` | `{"query"}` | Answer written from the fetched result pages |
+| `POST /api/crawl` | `{"url", "depth", "max_pages", "all_domains"}` | Starts a background crawl (202) |
+| `GET /api/crawl` | | Progress and log of the current or last crawl |
+| `DELETE /api/crawl` | | Cancels the running crawl |
+
+Errors share one shape, `{"error": {"code", "message"}}`, with codes a client can act
+on: `unauthorized` (401), `bad_request` (400), `no_context` (422), `busy` (409),
+`payload_too_large` (413), `llm_unavailable` (503), and `llm_error` / `web_error` (502).
+
+The phone and the computer need to share a network. On Windows, allow Python through
+the firewall for private networks the first time the server starts.
 
 ## How it works
 
@@ -195,28 +241,41 @@ The parts that took the real work, and the reasoning behind them:
 - **Encodings are treated as hostile.** `.env` files are sniffed for UTF-16 and UTF-8
   BOMs, which is exactly what a Windows shell writes by default, and a malformed file
   can never take a command down with it.
+- **The API assumes a hostile network.** A bearer token compared in constant time
+  guards every endpoint, request bodies are size-capped, every parameter is validated
+  against bounds, unexpected errors return a generic 500 without internals, and
+  concurrent LLM work is capped so a client cannot spawn unbounded model processes.
 - **Failure paths are first-class.** Unreachable hosts, empty indexes, stopword-only
   queries, refusals, rate limits, and timeouts each produce a clear message and a
-  meaningful exit code, never a traceback.
+  meaningful exit code, never a traceback. Even a stopped local API proxy is detected
+  in about a second, instead of after minutes of CLI retries.
 
 ## Testing
 
 ```bash
-python tests/test_e2e.py
+python tests/test_e2e.py      # 93 checks: the engine and the CLI
+python tests/test_server.py   # 50 checks: the HTTP API over real sockets
 ```
 
-[`tests/test_e2e.py`](tests/test_e2e.py) runs 86 functional checks and exits non-zero
-on failure, so it doubles as a CI gate. It makes **no network and no LLM calls**, which
-keeps it fast and free, and it never touches your index or settings: everything runs
-against a temporary directory that is cleaned up afterwards.
+Both harnesses exit non-zero on failure, so they double as CI gates. They make **no
+network and no LLM calls**, which keeps them fast and free: model output is faked
+in-process, and the crawl tests crawl a throwaway site served from a temporary
+directory on localhost. Neither touches your index or settings.
 
-What it covers: indexing and re-indexing, BM25 properties (rare terms outrank common
-ones, length normalization behaves), chunking edge cases including the regression where
-a misconfigured overlap could stall the splitter, Unicode handling, backend resolution
-across every configuration, LLM fail-open behavior against deliberately malformed model
-output, terminal-escape sanitization against a hostile page, `.env` encoding traps, exit
-codes for every subcommand, concurrent readers, and packaging consistency. Checks that
-need something absent from the machine report as skipped rather than failing.
+[`tests/test_e2e.py`](tests/test_e2e.py) covers indexing and re-indexing, BM25
+properties (rare terms outrank common ones, length normalization behaves), chunking
+edge cases including the regression where a misconfigured overlap could stall the
+splitter, Unicode handling, backend resolution across every configuration, LLM
+fail-open behavior against deliberately malformed model output, CLI-backend failures,
+terminal-escape sanitization against a hostile page, `.env` encoding traps, exit codes
+for every subcommand, concurrent readers, and packaging consistency.
+
+[`tests/test_server.py`](tests/test_server.py) starts the real server on an ephemeral
+port and covers token handling, authentication, validation of every input, each error
+status, CORS preflight, oversized bodies, internals never leaking into a 500, the full
+lifecycle of a background crawl (start, progress, conflict, cancellation, unreachable
+host), and 16 concurrent clients. Checks that need something absent from the machine
+report as skipped rather than failing.
 
 The same harness runs in CI on Ubuntu and Windows across Python 3.10 through 3.13,
 once with nothing installed (which is what proves the zero-dependency claim) and once
@@ -247,6 +306,7 @@ python run.py config show
 | `bm25_k1` / `bm25_b` | `1.5` / `0.75` | Saturation and length normalization |
 | `crawl_delay` / `http_timeout` | `0.5` / `20` | Crawler politeness |
 | `snippet_chars`, `web_results`, `user_agent`, `max_answer_tokens`, `cli_timeout` | … | Snippet width, result count, crawler identity, answer budget, CLI timeout |
+| `serve_host` / `serve_port` | `0.0.0.0` / `8765` | Where `llmsearch serve` listens |
 
 The index lives in `data/index.db`, overridable with `LLMSEARCH_DATA_DIR`. Deleting
 that file resets the engine; re-crawling a URL replaces its old version in place.
@@ -261,7 +321,7 @@ DuckDuckGo throttles bots, so the `ddgs` package is the reliable path.
 ## Roadmap
 
 Hybrid retrieval with an embedding index alongside BM25, scheduled re-crawls to keep
-the index fresh, a `serve` command exposing search over HTTP, and PDF ingestion.
+the index fresh, streamed answers over the API, and PDF ingestion.
 
 ## License
 

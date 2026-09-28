@@ -35,6 +35,9 @@ DEFAULTS: dict = {
     "http_timeout": 20,
     "user_agent": "llmsearch/0.1 (personal search engine)",
     "web_results": 8,
+    # Server settings (`llmsearch serve`, used by the mobile app)
+    "serve_host": "0.0.0.0",
+    "serve_port": 8765,
 }
 
 

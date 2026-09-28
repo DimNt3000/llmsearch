@@ -9,7 +9,7 @@ import re
 import sys
 from pathlib import Path
 
-from . import config, crawler, indexer, llm, websearch
+from . import __version__, config, crawler, indexer, llm, service, websearch
 
 TEXT_EXTS = {".txt", ".md", ".markdown", ".rst", ".text", ".html", ".htm"}
 
@@ -108,18 +108,16 @@ def _stream_printer(chunk: str) -> None:
 
 def cmd_crawl(args, cfg) -> int:
     conn = indexer.open_db(config.db_path())
-    total_chunks = pages = 0
     _print(f"Crawling {C.CYAN}{args.url}{C.RESET} "
            f"(depth {args.depth}, max {args.max_pages} pages)...")
-    for page in crawler.crawl(
-        args.url, cfg, depth=args.depth, max_pages=args.max_pages,
-        same_domain=not args.all_domains, log=lambda s: _print(f"{C.DIM}{_clean(s)}{C.RESET}"),
-    ):
-        n = indexer.add_document(conn, page["url"], page["title"], page["text"], "web", cfg)
-        pages += 1
-        total_chunks += n
-        _print(f"  {C.GREEN}+{C.RESET} {_clean(page['title'])[:70]} {C.DIM}({n} chunks){C.RESET}")
-    _print(f"\nIndexed {C.BOLD}{pages}{C.RESET} pages ({total_chunks} chunks).")
+    done = service.crawl_site(
+        conn, args.url, cfg, depth=args.depth, max_pages=args.max_pages,
+        same_domain=not args.all_domains,
+        log=lambda s: _print(f"{C.DIM}{_clean(s)}{C.RESET}"),
+        on_page=lambda page, n: _print(
+            f"  {C.GREEN}+{C.RESET} {_clean(page['title'])[:70]} {C.DIM}({n} chunks){C.RESET}"),
+    )
+    _print(f"\nIndexed {C.BOLD}{done['pages']}{C.RESET} pages ({done['chunks']} chunks).")
     return 0
 
 
@@ -156,94 +154,93 @@ def cmd_add(args, cfg) -> int:
 def cmd_search(args, cfg) -> int:
     conn = indexer.open_db(config.db_path())
     query = " ".join(args.query)
-    queries = [query]
-    use_rerank = args.rerank
-
-    if args.smart:
-        try:
-            variants = llm.expand_query(query, cfg)
-            if variants:
-                _print(f"{C.DIM}Also searching: {'; '.join(variants)}{C.RESET}\n")
-                queries += variants
-        except llm.LLMUnavailable:
-            _print(f"{C.DIM}LLM unavailable - falling back to plain BM25{C.RESET}")
-            use_rerank = False  # rerank would hit the same missing backend
-
-    rankings = [indexer.search_chunks(conn, q, cfg) for q in queries]
-    chunks = rankings[0] if len(rankings) == 1 else indexer.rrf_merge(rankings)
-    results = indexer.group_by_doc(chunks, cfg["top_k"] * 2 if use_rerank else cfg["top_k"])
-
-    if use_rerank and results:
-        try:
-            results = llm.rerank(query, results, cfg, keep=cfg["top_k"])
-        except llm.LLMUnavailable:
-            _print(f"{C.DIM}LLM unavailable - falling back to plain BM25{C.RESET}")
-            results = results[:cfg["top_k"]]
-
-    _print_results(results, query, cfg, as_json=args.json)
+    res = service.search(conn, query, cfg, smart=args.smart, rerank=args.rerank)
+    if not args.json:  # keep --json output machine-parseable
+        if res["variants"]:
+            _print(f"{C.DIM}Also searching: {_clean('; '.join(res['variants']))}{C.RESET}\n")
+        if res["notice"]:
+            _print(f"{C.DIM}{res['notice']}{C.RESET}")
+    _print_results(res["results"], query, cfg, as_json=args.json)
     return 0
 
 
 def cmd_ask(args, cfg) -> int:
     conn = indexer.open_db(config.db_path())
     question = " ".join(args.question)
-    chunks = indexer.search_chunks(conn, question, cfg)
-    if args.smart:
-        variants = llm.expand_query(question, cfg)
-        if variants:
-            rankings = [chunks] + [indexer.search_chunks(conn, v, cfg) for v in variants]
-            chunks = indexer.rrf_merge(rankings)
-    contexts = indexer.top_contexts(chunks, cfg["ask_contexts"])
-    if not contexts:
-        _print(f"{C.DIM}The index has nothing relevant. "
-               f"Use `crawl` or `add` to index content first.{C.RESET}")
+    try:
+        res = service.ask(conn, question, cfg, smart=args.smart, stream_to=_stream_printer)
+    except service.NoContext as exc:
+        _print(f"{C.DIM}{exc}{C.RESET}")
         return 1
-    llm.answer(question, contexts, cfg, stream_to=_stream_printer)
     _print()
-    _print_source_list(contexts)
+    _print_source_list(res["sources"])
     return 0
 
 
 def cmd_summarize(args, cfg) -> int:
     conn = indexer.open_db(config.db_path())
     query = " ".join(args.query)
-    chunks = indexer.search_chunks(conn, query, cfg)
-    results = indexer.group_by_doc(chunks, cfg["top_k"])
-    if not results:
-        _print(f"{C.DIM}No results to summarize.{C.RESET}")
+    try:
+        res = service.summarize(conn, query, cfg, stream_to=_stream_printer)
+    except service.NoContext as exc:
+        _print(f"{C.DIM}{exc}{C.RESET}")
         return 1
-    llm.summarize(query, results, cfg, stream_to=_stream_printer)
     _print()
-    _print_source_list(results)
+    _print_source_list(res["sources"])
     return 0
 
 
 def cmd_web(args, cfg) -> int:
     query = " ".join(args.query)
-    results = websearch.ddg_search(query, args.num or cfg["web_results"], cfg)
     if not args.ask:
-        _print_results(results, query, cfg, as_json=args.json)
+        res = service.web_search(query, cfg, n=args.num)
+        _print_results(res["results"], query, cfg, as_json=args.json)
         return 0
 
     # --ask: fetch the top pages and answer from their content
-    pages: list[dict] = []
-    for r in results[:4]:
-        try:
-            _print(f"{C.DIM}fetching {_clean(r['url'])}...{C.RESET}")
-            page = crawler.fetch_page_text(r["url"], cfg)
-            if page["text"].strip():
-                pages.append(page)
-        except crawler.CrawlError as exc:
-            _print(f"{C.DIM}  skipped: {_clean(str(exc))}{C.RESET}")
-        if len(pages) >= 3:
-            break
-    if not pages:
-        _print(f"{C.RED}Could not fetch any result pages.{C.RESET}")
+    try:
+        pages, _ = service.fetch_web_pages(
+            query, cfg, n=args.num, log=lambda s: _print(f"{C.DIM}{_clean(s)}{C.RESET}"))
+    except service.NoContext as exc:
+        _print(f"{C.RED}{exc}{C.RESET}")
         return 1
     _print()
     llm.answer(query, pages, cfg, stream_to=_stream_printer)
     _print()
     _print_source_list(pages)
+    return 0
+
+
+def cmd_serve(args, cfg) -> int:
+    from . import server  # the HTTP stack only loads when serving
+
+    host = args.host or cfg["serve_host"]
+    port = args.port or cfg["serve_port"]
+    token = server.load_or_create_token(rotate=args.new_token)
+    try:
+        httpd = server.make_server(host, port, token,
+                                   log=lambda s: _print(f"{C.DIM}{s}{C.RESET}"))
+    except OSError as exc:
+        _print(f"{C.RED}error:{C.RESET} cannot listen on {host}:{port} ({exc.strerror or exc})")
+        return 1
+
+    port = httpd.server_address[1]
+    _print(f"{C.BOLD}llmsearch server{C.RESET} {C.DIM}v{__version__}{C.RESET}")
+    _print(f"  Local:    http://127.0.0.1:{port}")
+    if host in ("0.0.0.0", ""):
+        for ip in server.lan_addresses():
+            _print(f"  Network:  {C.CYAN}http://{ip}:{port}{C.RESET}   <- enter this in the app")
+    elif host not in ("127.0.0.1", "localhost"):
+        _print(f"  Network:  http://{host}:{port}")
+    _print(f"  Token:    {C.YELLOW}{token}{C.RESET}")
+    _print(f"\n{C.DIM}The phone must be on the same network. If the app cannot connect,\n"
+           f"allow Python through the firewall for private networks. Ctrl+C stops.{C.RESET}\n")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        _print(f"\n{C.DIM}server stopped{C.RESET}")
+    finally:
+        httpd.server_close()
     return 0
 
 
@@ -298,6 +295,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  llmsearch search \"ranking\" --smart --rerank\n"
             "  llmsearch ask \"how does BM25 length normalization work?\"\n"
             "  llmsearch web \"latest python release\" --ask\n"
+            "  llmsearch serve                      # API for the mobile app\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -343,6 +341,13 @@ def build_parser() -> argparse.ArgumentParser:
                       help="fetch top pages and answer from them")
     mode.add_argument("--json", action="store_true", help="machine-readable output")
     p.set_defaults(func=cmd_web)
+
+    p = sub.add_parser("serve", help="JSON API for the llmsearch mobile app")
+    p.add_argument("--host", help="interface to bind (default: serve_host, 0.0.0.0)")
+    p.add_argument("--port", type=int, help="port to listen on (default: serve_port, 8765)")
+    p.add_argument("--new-token", action="store_true",
+                   help="rotate the access token (re-pair the app afterwards)")
+    p.set_defaults(func=cmd_serve)
 
     p = sub.add_parser("stats", help="index statistics")
     p.set_defaults(func=cmd_stats)
