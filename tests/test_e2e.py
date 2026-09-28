@@ -356,11 +356,44 @@ def t_cli_backend_errors():
         try:
             llm._cli_complete("sys", "hi", dict(config.DEFAULTS), None)
             outcome = "no error"
+        except llm.LLMUnavailable as exc:
+            outcome = f"misread as a login problem: {exc}"
         except llm.LLMError as exc:
             outcome = str(exc)
         # Regression: this used to report "unknown error" and drop the real message.
         check("CLI failure surfaces the error it printed on stdout",
-              "Connection error" in outcome, outcome)
+              "Connection error" in outcome and "misread" not in outcome, outcome)
+
+        expired = ('Failed to authenticate. API Error: 401 {"type":"error","error":'
+                   '{"type":"authentication_error","message":"OAuth access token has '
+                   'expired. Re-authenticate to continue."}}')
+        envs: list[dict] = []
+
+        def fake_run(*a, **k):
+            envs.append(k.get("env") or {})
+            return subprocess.CompletedProcess(a, 1, stdout=expired, stderr="")
+
+        llm.subprocess.run = fake_run
+        try:
+            llm._cli_complete("sys", "hi", dict(config.DEFAULTS), None)
+            outcome = "no error"
+        except llm.LLMUnavailable as exc:
+            outcome = str(exc)
+        except llm.LLMError as exc:
+            outcome = f"not reported as unavailable: {exc}"
+        # Regression: an expired CLI login came back as a raw 401, after minutes of retries.
+        check("expired CLI login -> LLMUnavailable that names the fix",
+              "claude auth login" in outcome, outcome)
+        check("the CLI runs with a small retry budget by default",
+              bool(envs) and envs[-1].get("CLAUDE_CODE_MAX_RETRIES") == "2",
+              str([e.get("CLAUDE_CODE_MAX_RETRIES") for e in envs]))
+        try:
+            llm._cli_complete("sys", "hi", {**config.DEFAULTS, "cli_max_retries": 5}, None)
+        except llm.LLMError:
+            pass
+        check("cli_max_retries sets the CLI's retry budget",
+              envs[-1].get("CLAUDE_CODE_MAX_RETRIES") == "5",
+              str(envs[-1].get("CLAUDE_CODE_MAX_RETRIES")))
     finally:
         llm.shutil.which, llm.subprocess.run, llm._claude_base_url = real
 T("cli_backend_errors", t_cli_backend_errors)

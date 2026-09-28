@@ -21,6 +21,7 @@ DEFAULTS: dict = {
     "backend": "auto",              # auto | api | claude-cli | off
     "max_answer_tokens": 4096,
     "cli_timeout": 240,             # seconds for the claude CLI fallback
+    "cli_max_retries": 2,           # API retries per CLI call (the CLI's own 10 take minutes)
     "answer_style": "concise and factual",
     # Retrieval settings
     "top_k": 8,                     # results shown by `search`

@@ -247,13 +247,16 @@ The parts that took the real work, and the reasoning behind them:
   concurrent LLM work is capped so a client cannot spawn unbounded model processes.
 - **Failure paths are first-class.** Unreachable hosts, empty indexes, stopword-only
   queries, refusals, rate limits, and timeouts each produce a clear message and a
-  meaningful exit code, never a traceback. Even a stopped local API proxy is detected
-  in about a second, instead of after minutes of CLI retries.
+  meaningful exit code, never a traceback. The `claude` CLI retries a failed API call
+  ten times by default, which turned an expired login into a three-minute wait; the
+  backend caps it at two retries and recognizes auth errors, so an expired login is
+  reported in seconds along with the command that fixes it, and a stopped local API
+  proxy is detected in about a second without starting the CLI at all.
 
 ## Testing
 
 ```bash
-python tests/test_e2e.py      # 93 checks: the engine and the CLI
+python tests/test_e2e.py      # 96 checks: the engine and the CLI
 python tests/test_server.py   # 50 checks: the HTTP API over real sockets
 ```
 
@@ -305,7 +308,8 @@ python run.py config show
 | `chunk_chars` / `chunk_overlap` | `1400` / `200` | Chunking granularity |
 | `bm25_k1` / `bm25_b` | `1.5` / `0.75` | Saturation and length normalization |
 | `crawl_delay` / `http_timeout` | `0.5` / `20` | Crawler politeness |
-| `snippet_chars`, `web_results`, `user_agent`, `max_answer_tokens`, `cli_timeout` | … | Snippet width, result count, crawler identity, answer budget, CLI timeout |
+| `cli_timeout` / `cli_max_retries` | `240` / `2` | Time limit and API retries for each `claude` CLI call |
+| `snippet_chars`, `web_results`, `user_agent`, `max_answer_tokens` | … | Snippet width, result count, crawler identity, answer budget |
 | `serve_host` / `serve_port` | `0.0.0.0` / `8765` | Where `llmsearch serve` listens |
 
 The index lives in `data/index.db`, overridable with `LLMSEARCH_DATA_DIR`. Deleting

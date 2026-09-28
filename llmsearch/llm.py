@@ -185,6 +185,18 @@ def _dead_local_proxy(url: str | None) -> bool:
         return True
 
 
+# What the CLI prints when its login is missing, expired, or revoked.
+_CLI_AUTH_ERROR = re.compile(
+    r"authentication_error|failed to authenticate|invalid api key|please run /login"
+    r"|oauth (?:access )?token has (?:expired|been revoked)|not logged in",
+    re.IGNORECASE,
+)
+_CLI_AUTH_HINT = (
+    "The claude CLI could not sign in to Anthropic: its login has expired or was "
+    'revoked. Run "claude auth login" in a terminal, then try again.'
+)
+
+
 def _cli_complete(system: str, prompt: str, cfg: dict,
                   stream_to: StreamFn | None) -> str:
     exe = shutil.which("claude")
@@ -197,6 +209,10 @@ def _cli_complete(system: str, prompt: str, cfg: dict,
             "listening there. Start that proxy, or remove ANTHROPIC_BASE_URL from "
             "~/.claude/settings.json.")
     full_prompt = f"{system}\n\n---\n\n{prompt}" if system else prompt
+    # The CLI retries failed API calls, 401s included, ten times with exponential
+    # backoff, so an expired login took over three minutes to report. A couple of
+    # retries still cover a token refresh or a brief overload.
+    env = dict(os.environ, CLAUDE_CODE_MAX_RETRIES=str(cfg.get("cli_max_retries", 2)))
     try:
         proc = subprocess.run(
             [exe, "-p", "--model", cfg.get("cli_model", "opus"), "--output-format", "text"],
@@ -206,6 +222,7 @@ def _cli_complete(system: str, prompt: str, cfg: dict,
             encoding="utf-8",
             errors="replace",
             timeout=cfg.get("cli_timeout", 240),
+            env=env,
         )
     except subprocess.TimeoutExpired as exc:
         raise LLMError(f"claude CLI timed out after {cfg.get('cli_timeout', 240)}s") from exc
@@ -215,6 +232,8 @@ def _cli_complete(system: str, prompt: str, cfg: dict,
     if proc.returncode != 0:
         # In print mode the CLI often reports API errors on stdout, not stderr.
         detail = (proc.stderr or "").strip() or (proc.stdout or "").strip() or "no output"
+        if _CLI_AUTH_ERROR.search(detail):
+            raise LLMUnavailable(_CLI_AUTH_HINT)
         raise LLMError(f"claude CLI failed (exit {proc.returncode}): {detail[-400:]}")
     result = (proc.stdout or "").strip()
     if not result:
