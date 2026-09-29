@@ -6,10 +6,10 @@ requests. Uses only urllib + html.parser so it has zero dependencies.
 
 from __future__ import annotations
 
+import re
 import time
 import urllib.error
 import urllib.request
-import urllib.robotparser
 from html import unescape
 from html.parser import HTMLParser
 from typing import Callable, Iterator
@@ -17,7 +17,11 @@ from urllib.parse import urldefrag, urljoin, urlparse
 
 MAX_BYTES = 3 * 1024 * 1024  # per-page download cap
 
-_SKIP_CONTENT = frozenset(("script", "style", "noscript", "template", "svg", "iframe"))
+# Text inside these is never indexed. Menus and footers are boilerplate that
+# repeats on every page: a documentation sidebar listing the whole API made up
+# 80% of each PyTorch page. Links inside them are still followed.
+_SKIP_CONTENT = frozenset(
+    ("script", "style", "noscript", "template", "svg", "iframe", "nav", "footer"))
 _BLOCK_TAGS = frozenset(
     ("p", "div", "br", "li", "ul", "ol", "table", "tr", "section", "article",
      "header", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre")
@@ -131,8 +135,7 @@ def extract(html: str, base_url: str) -> tuple[str, str, list[str]]:
     text = "\n".join(
         line.strip() for line in "".join(parser.text_parts).splitlines()
     )
-    import re as _re
-    text = _re.sub(r"\n{3,}", "\n\n", text).strip()
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
     links: list[str] = []
     seen: set[str] = set()
@@ -144,30 +147,98 @@ def extract(html: str, base_url: str) -> tuple[str, str, list[str]]:
     return title, text, links
 
 
+RobotsRules = list[tuple[bool, "re.Pattern[str]", int]]  # (allow, pattern, length)
+
+
+def _robots_pattern(path: str) -> "re.Pattern[str]":
+    """A robots.txt path as a regex: `*` matches any run, a final `$` anchors."""
+    anchored = path.endswith("$")
+    body = re.escape(path[:-1] if anchored else path).replace(r"\*", ".*")
+    return re.compile(body + ("$" if anchored else ""))
+
+
+def parse_robots(text: str, token: str) -> RobotsRules:
+    """The rules a robots.txt sets for the crawler whose product token is `token`.
+
+    As in RFC 9309, the rules come from every group that names the token, or
+    from the `*` groups when none does, and consecutive user-agent lines share
+    one group.
+    """
+    groups: list[tuple[set[str], list[tuple[bool, str]]]] = []
+    agents: set[str] = set()
+    rules: list[tuple[bool, str]] = []
+    in_rules = False
+    for raw in text.splitlines():
+        key, sep, value = raw.split("#", 1)[0].partition(":")
+        if not sep:
+            continue
+        key, value = key.strip().lower(), value.strip()
+        if key == "user-agent":
+            if in_rules:  # a user-agent line after rules starts the next group
+                groups.append((agents, rules))
+                agents, rules, in_rules = set(), [], False
+            agents.add(value.split("/")[0].strip().lower())
+        elif key in ("allow", "disallow") and agents:
+            in_rules = True
+            if value:  # an empty Disallow allows everything, so it adds no rule
+                rules.append((key == "allow", value))
+    if agents:
+        groups.append((agents, rules))
+    chosen = [g for g in groups if token in g[0]] or [g for g in groups if "*" in g[0]]
+    return [(allow, _robots_pattern(path), len(path))
+            for _, group_rules in chosen for allow, path in group_rules]
+
+
 class _Robots:
+    """robots.txt rules per origin, fetched with the crawler's own user agent.
+
+    urllib.robotparser fetches robots.txt with Python's default user agent,
+    which bot protection such as Cloudflare answers with 403, and it reads a
+    403 as "disallow everything"; it also takes `*` and `$` literally. This
+    follows RFC 9309 instead: the longest matching rule wins and Allow wins a
+    tie, a missing or forbidden robots.txt (4xx) allows everything, and a
+    server error (5xx) allows nothing.
+    """
+
     def __init__(self, ua: str, timeout: float) -> None:
         self.ua = ua
         self.timeout = timeout
-        self._cache: dict[str, urllib.robotparser.RobotFileParser | None] = {}
+        self.token = (ua.split("/")[0].split() or ["*"])[0].lower()
+        self._cache: dict[str, bool | RobotsRules] = {}
+
+    def _load(self, origin: str) -> bool | RobotsRules:
+        try:
+            _, ctype, body = fetch(origin + "/robots.txt", self.ua, self.timeout)
+        except CrawlError as exc:
+            status = getattr(exc.__cause__, "code", None)
+            return not (isinstance(status, int) and status >= 500)
+        return parse_robots(decode(body, ctype), self.token)
 
     def allowed(self, url: str) -> bool:
         parts = urlparse(url)
         origin = f"{parts.scheme}://{parts.netloc}"
         if origin not in self._cache:
-            rp = urllib.robotparser.RobotFileParser(origin + "/robots.txt")
-            try:
-                rp.read()
-                self._cache[origin] = rp
-            except Exception:
-                self._cache[origin] = None  # unreachable robots.txt -> allow
-        rp = self._cache[origin]
-        return True if rp is None else rp.can_fetch(self.ua, url)
+            self._cache[origin] = self._load(origin)
+        rules = self._cache[origin]
+        if isinstance(rules, bool):
+            return rules
+        target = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+        best, verdict = -1, True
+        for allow, pattern, length in rules:
+            if pattern.match(target) and (length > best or (length == best and allow)):
+                best, verdict = length, allow
+        return verdict
 
 
 def crawl(start_url: str, cfg: dict, depth: int = 1, max_pages: int = 30,
           same_domain: bool = True,
-          log: Callable[[str], None] = lambda s: None) -> Iterator[dict]:
-    """BFS crawl yielding {"url", "title", "text"} per fetched page."""
+          log: Callable[[str], None] = lambda s: None,
+          path_prefix: str | None = None) -> Iterator[dict]:
+    """BFS crawl yielding {"url", "title", "text"} per fetched page.
+
+    `path_prefix` keeps the crawl inside one section of a site, such as
+    "/docs/2.14/", by following only links whose path starts with it.
+    """
     ua, timeout, delay = cfg["user_agent"], cfg["http_timeout"], cfg["crawl_delay"]
     robots = _Robots(ua, timeout)
     start_host = urlparse(start_url).netloc.lower()
@@ -208,6 +279,8 @@ def crawl(start_url: str, cfg: dict, depth: int = 1, max_pages: int = 30,
                 if link in seen:
                     continue
                 if same_domain and urlparse(link).netloc.lower() != start_host:
+                    continue
+                if path_prefix and not urlparse(link).path.startswith(path_prefix):
                     continue
                 seen.add(link)
                 queue.append((link, level + 1))

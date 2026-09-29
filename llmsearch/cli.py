@@ -112,7 +112,7 @@ def cmd_crawl(args, cfg) -> int:
            f"(depth {args.depth}, max {args.max_pages} pages)...")
     done = service.crawl_site(
         conn, args.url, cfg, depth=args.depth, max_pages=args.max_pages,
-        same_domain=not args.all_domains,
+        same_domain=not args.all_domains, path_prefix=args.path_prefix,
         log=lambda s: _print(f"{C.DIM}{_clean(s)}{C.RESET}"),
         on_page=lambda page, n: _print(
             f"  {C.GREEN}+{C.RESET} {_clean(page['title'])[:70]} {C.DIM}({n} chunks){C.RESET}"),
@@ -308,6 +308,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-pages", type=int, default=30)
     p.add_argument("--all-domains", action="store_true",
                    help="follow links off the start domain")
+    p.add_argument("--path-prefix", metavar="PATH",
+                   help="follow only links whose path starts with PATH, e.g. /docs/2.14/")
     p.set_defaults(func=cmd_crawl)
 
     p = sub.add_parser("add", help="index local text/markdown/html files")

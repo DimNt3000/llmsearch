@@ -524,6 +524,114 @@ def t_dotenv():
 T("dotenv", t_dotenv)
 
 
+def t_robots():
+    """robots.txt is fetched as the crawler and read the way RFC 9309 says."""
+    import urllib.error
+    from llmsearch import crawler
+
+    robots = crawler._Robots("llmsearch/0.1 (test)", 5)
+    robots._cache["https://docs.example"] = crawler.parse_robots(
+        "User-agent: *\n"
+        "Disallow: /docs/2.8*/\n"
+        "Disallow: /*/_static/\n"
+        "Disallow: /torchx/*/\n"
+        "Allow: /torchx/latest/\n"
+        "Disallow: /*.pdf$\n", robots.token)
+
+    def ok(path: str) -> bool:
+        return robots.allowed("https://docs.example" + path)
+
+    check("robots: pages outside the rules are allowed", ok("/docs/2.14/torch.html"))
+    check("robots: * wildcards match",
+          not ok("/docs/2.8.1/torch.html") and not ok("/docs/2.14/_static/site.css"))
+    check("robots: the longest match wins, so an Allow can carve out a Disallow",
+          ok("/torchx/latest/index.html") and not ok("/torchx/0.7/index.html"))
+    check("robots: $ anchors the end of the path", not ok("/paper.pdf") and ok("/paper.pdf?view=1"))
+
+    robots._cache["https://named.example"] = crawler.parse_robots(
+        "User-agent: *\nDisallow: /\n\nUser-agent: llmsearch\nDisallow: /private/\n", robots.token)
+    check("robots: a group naming the crawler replaces the * group",
+          robots.allowed("https://named.example/public")
+          and not robots.allowed("https://named.example/private/page"))
+    empty = crawler.parse_robots(
+        "User-agent: *\nDisallow:\n\nUser-agent: badbot\nDisallow: /\n", robots.token)
+    check("robots: an empty Disallow allows everything and still ends its group",
+          empty == [], str(empty))
+
+    real_fetch = crawler.fetch
+    agents: list[str] = []
+
+    def fake_fetch(url, ua, timeout):
+        agents.append(ua)
+        code = {"https://forbidden.example": 403, "https://broken.example": 503}.get(
+            url.rsplit("/", 1)[0])
+        if code:
+            raise crawler.CrawlError(url) from urllib.error.HTTPError(url, code, "", None, None)
+        return url, "text/plain", b"User-agent: *\nDisallow: /secret/\n"
+
+    try:
+        crawler.fetch = fake_fetch
+        fresh = crawler._Robots("llmsearch/0.1 (test)", 5)
+        check("robots: rules from a fetched robots.txt apply",
+              not fresh.allowed("https://site.example/secret/a")
+              and fresh.allowed("https://site.example/a"))
+        # Regression: Python's robotparser fetched robots.txt as Python-urllib,
+        # bot protection answered 403, and the whole site counted as disallowed.
+        check("robots: robots.txt is fetched with the crawler's user agent",
+              bool(agents) and set(agents) == {"llmsearch/0.1 (test)"}, str(agents))
+        check("robots: a forbidden robots.txt (403) leaves the site allowed",
+              fresh.allowed("https://forbidden.example/docs/"))
+        check("robots: a server error (5xx) leaves the site disallowed",
+              not fresh.allowed("https://broken.example/docs/"))
+    finally:
+        crawler.fetch = real_fetch
+T("robots", t_robots)
+
+
+def t_crawl_scope():
+    """Menus stay out of the index, and a path prefix keeps a crawl in one section."""
+    import urllib.error
+    from llmsearch import crawler
+
+    index = "https://site.example/docs/index.html"
+    pages = {
+        index: "<html><head><title>Docs</title></head><body>"
+               "<nav><a href='/docs/api.html'>API</a> sidebarterm "
+               "<a href='/blog/news.html'>News</a></nav>"
+               "<p>docs body text</p><footer>footerterm</footer></body></html>",
+        "https://site.example/docs/api.html": "<html><body><p>api text</p></body></html>",
+        "https://site.example/blog/news.html": "<html><body><p>news text</p></body></html>",
+    }
+    _, text, links = crawler.extract(pages[index], index)
+    # Regression: a docs sidebar listing the whole API was 80% of each PyTorch page.
+    check("extract leaves menus and footers out of the text",
+          "docs body text" in text and "sidebarterm" not in text and "footerterm" not in text,
+          repr(text))
+    check("extract still returns the links inside menus",
+          {"https://site.example/docs/api.html", "https://site.example/blog/news.html"} <= set(links),
+          str(links))
+
+    def fake_fetch(url, ua, timeout):
+        if url.endswith("/robots.txt"):
+            raise crawler.CrawlError(url) from urllib.error.HTTPError(url, 404, "", None, None)
+        return url, "text/html", pages[url].encode()
+
+    real_fetch = crawler.fetch
+    cfg = {**config.DEFAULTS, "crawl_delay": 0}
+    try:
+        crawler.fetch = fake_fetch
+        inside = [p["url"] for p in crawler.crawl(index, cfg, depth=1, max_pages=10,
+                                                   path_prefix="/docs/")]
+        anywhere = [p["url"] for p in crawler.crawl(index, cfg, depth=1, max_pages=10)]
+    finally:
+        crawler.fetch = real_fetch
+    check("crawl with a path prefix stays inside that section",
+          set(inside) == {index, "https://site.example/docs/api.html"}, str(inside))
+    check("crawl without a prefix still follows every same-site link",
+          sorted(anywhere) == sorted(pages), str(anywhere))
+T("crawl_scope", t_crawl_scope)
+
+
 # ---------------------------------------------------------------- 7. packaging
 def t_packaging():
     import llmsearch

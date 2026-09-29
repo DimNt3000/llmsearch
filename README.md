@@ -115,7 +115,7 @@ from the official Python.org site [3].
 
 | Command | What it does | Needs an LLM |
 |---|---|---|
-| `crawl URL [--depth N] [--max-pages N] [--all-domains]` | Crawl a site into the index, politely | no |
+| `crawl URL [--depth N] [--max-pages N] [--all-domains] [--path-prefix PATH]` | Crawl a site into the index, politely, optionally within one section | no |
 | `add PATH...` | Index local `.md` / `.txt` / `.rst` / `.html` files or folders | no |
 | `search QUERY` | BM25 search with highlighted snippets | no |
 | `search QUERY --smart` | LLM query expansion, merged with reciprocal rank fusion | optional |
@@ -235,9 +235,17 @@ The parts that took the real work, and the reasoning behind them:
   text. Before anything untrusted reaches stdout, complete ANSI CSI/OSC/Fe sequences
   and stray control bytes are stripped, so a hostile page cannot repaint the terminal
   or forge output. Verified with an adversarial page carrying embedded escapes.
-- **The crawler behaves.** robots.txt is honored per origin, requests are throttled,
-  responses are capped at 3 MB, content types are allow-listed, and gzip and charset
-  are handled explicitly instead of hoping the bytes are UTF-8.
+- **The crawler behaves.** robots.txt is honored per origin with RFC 9309 matching
+  (`*` and `$` wildcards, the longest rule wins), requests are throttled, responses
+  are capped at 3 MB, content types are allow-listed, and gzip and charset are handled
+  explicitly instead of hoping the bytes are UTF-8. robots.txt is fetched with the
+  crawler's own user agent: bot protection answers Python's default one with a 403,
+  which the standard library's parser reads as a ban on the whole site.
+- **Boilerplate stays out of the index.** Text inside `<nav>` and `<footer>` is not
+  indexed, while the links in them are still followed. On the PyTorch docs a sidebar
+  listing the whole API was 80% of every page, so each class name matched every page
+  and real results sank. `--path-prefix` keeps a crawl inside one section of a site,
+  such as a single version of a documentation set.
 - **Encodings are treated as hostile.** `.env` files are sniffed for UTF-16 and UTF-8
   BOMs, which is exactly what a Windows shell writes by default, and a malformed file
   can never take a command down with it.
@@ -256,7 +264,7 @@ The parts that took the real work, and the reasoning behind them:
 ## Testing
 
 ```bash
-python tests/test_e2e.py      # 96 checks: the engine and the CLI
+python tests/test_e2e.py      # 110 checks: the engine and the CLI
 python tests/test_server.py   # 50 checks: the HTTP API over real sockets
 ```
 
@@ -270,7 +278,9 @@ properties (rare terms outrank common ones, length normalization behaves), chunk
 edge cases including the regression where a misconfigured overlap could stall the
 splitter, Unicode handling, backend resolution across every configuration, LLM
 fail-open behavior against deliberately malformed model output, CLI-backend failures,
-terminal-escape sanitization against a hostile page, `.env` encoding traps, exit codes
+terminal-escape sanitization against a hostile page, `.env` encoding traps, robots.txt
+rules and the status codes a robots.txt fetch can return, menus kept out of indexed
+text, crawls scoped to a path prefix, exit codes
 for every subcommand, concurrent readers, and packaging consistency.
 
 [`tests/test_server.py`](tests/test_server.py) starts the real server on an ephemeral

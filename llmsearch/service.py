@@ -142,11 +142,13 @@ def web_ask(query: str, cfg: dict, n: int | None = None, log: Log | None = None,
 def crawl_site(conn: sqlite3.Connection, url: str, cfg: dict, depth: int = 1,
                max_pages: int = 30, same_domain: bool = True, log: Log | None = None,
                on_page: Callable[[dict, int], None] | None = None,
-               should_stop: Callable[[], bool] | None = None) -> dict:
+               should_stop: Callable[[], bool] | None = None,
+               path_prefix: str | None = None) -> dict:
     """Crawl a site into the index. `should_stop` is checked after every page."""
     pages = chunks = 0
     for page in crawler.crawl(url, cfg, depth=depth, max_pages=max_pages,
-                              same_domain=same_domain, log=log or (lambda s: None)):
+                              same_domain=same_domain, log=log or (lambda s: None),
+                              path_prefix=path_prefix):
         n = indexer.add_document(conn, page["url"], page["title"], page["text"], "web", cfg)
         pages += 1
         chunks += n
