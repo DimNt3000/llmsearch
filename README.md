@@ -264,7 +264,7 @@ The parts that took the real work, and the reasoning behind them:
 ## Testing
 
 ```bash
-python tests/test_e2e.py      # 110 checks: the engine and the CLI
+python tests/test_e2e.py      # 111 checks: the engine and the CLI
 python tests/test_server.py   # 50 checks: the HTTP API over real sockets
 ```
 

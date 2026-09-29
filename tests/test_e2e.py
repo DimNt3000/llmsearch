@@ -143,6 +143,12 @@ def t_readd():
     ).fetchone()[0]
     check("re-add: replaces instead of duplicating", before == after, f"{before}->{after}")
     check("re-add: no orphan postings left behind", orphans == 0, str(orphans))
+    # Regression: without this index, re-indexing a page scanned every posting
+    # once per deleted chunk, about 6 s per page on a 600k-posting index.
+    plan = conn.execute(
+        "EXPLAIN QUERY PLAN SELECT 1 FROM postings WHERE chunk_id = 1").fetchall()
+    check("re-add: postings are indexed by chunk, so replacing a page is not a full scan",
+          any("idx_postings_chunk" in str(row) for row in plan), str(plan))
 T("readd", t_readd)
 
 

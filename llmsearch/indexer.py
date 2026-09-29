@@ -47,6 +47,9 @@ CREATE TABLE IF NOT EXISTS postings(
     PRIMARY KEY(term, chunk_id)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id);
+-- Re-indexing a document cascades from its chunks to their postings; without
+-- this index every deleted chunk scanned the whole postings table.
+CREATE INDEX IF NOT EXISTS idx_postings_chunk ON postings(chunk_id);
 """
 
 
