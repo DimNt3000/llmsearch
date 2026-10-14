@@ -30,6 +30,7 @@ import sys
 import tempfile
 import time
 import traceback
+from collections import Counter
 from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parent.parent
@@ -472,6 +473,64 @@ def t_bm25():
     check("empty document indexes without crashing",
           s["documents"] == 3 and s["chunks"] >= 2, str(s))
 T("bm25", t_bm25)
+
+
+def t_title_field():
+    """Titles and URL names count, without one title word outweighing a whole query."""
+    db = SCRATCH / "titles" / "index.db"
+    db.parent.mkdir(exist_ok=True)
+    conn = indexer.open_db(db)
+    cfg = dict(config.DEFAULTS)
+    base = "https://docs.example/api/"
+    filler = " ".join(f"filler{i} words about layers and tensors" for i in range(40))
+    docs = {
+        "torch.nn.Conv2d.html": ("Conv2d", f"Applies a 2D convolution. {filler} conv2d."),
+        "torch.ao.nn.quantized.dynamic.modules.conv.Conv2d.html":
+            ("Conv2d", f"Applies a 2D convolution. {filler} conv2d."),
+        "torch.nn.Sequential.html": ("Sequential", "Example: conv2d then relu then conv2d then conv2d."),
+        "torch.index_select.html": ("index_select", "Selects entries along a dimension by index."),
+        "search.html": ("Search engines",
+                        "An inverted index maps terms to postings. The inverted index is the core."),
+        "handbook.html": ("Zylophant handbook", "Everything about the rare fruit."),
+    }
+    for name, (title, text) in docs.items():
+        indexer.add_document(conn, base + name, title, text, "web", cfg)
+
+    def top(query: str, **over) -> list[str]:
+        hits = indexer.group_by_doc(indexer.search_chunks(conn, query, {**cfg, **over}), 10)
+        return [h["url"].rsplit("/", 1)[-1] for h in hits]
+
+    check("title field: terms come from the title and the URL name",
+          indexer.title_terms("Conv2d", base + "torch.nn.Conv2d.html")
+          == Counter({"conv2d": 2, "torch": 1, "nn": 1, "html": 1}))
+    plain, titled = top("conv2d", title_weight=0), top("conv2d")
+    check("title field: without it, a page repeating the word beats the page named after it",
+          plain[0] == "torch.nn.Sequential.html", str(plain))
+    check("title field: the page named after the query ranks first",
+          titled[0] == "torch.nn.Conv2d.html", str(titled))
+    check("title field: of two pages with the same title, the shorter URL name wins",
+          titled.index("torch.nn.Conv2d.html")
+          < titled.index("torch.ao.nn.quantized.dynamic.modules.conv.Conv2d.html"), str(titled))
+    # Regression: an additive title bonus let one title word outweigh the query,
+    # so "index_select" beat the page about inverted indexes.
+    multi = top("inverted index")
+    check("title field: one title word does not outweigh the rest of the query",
+          multi[0] == "search.html", str(multi))
+    check("title field: a page that matches only in its title is still found",
+          top("zylophant")[:1] == ["handbook.html"], str(top("zylophant")))
+
+    # An index built before the title field existed is migrated on open.
+    conn.execute("DELETE FROM title_postings")
+    conn.execute("PRAGMA user_version = 0")
+    conn.commit()
+    conn.close()
+    conn = indexer.open_db(db)
+    check("title field: an older index gets its title field on open",
+          conn.execute("PRAGMA user_version").fetchone()[0] == 1
+          and conn.execute("SELECT COUNT(DISTINCT doc_id) FROM title_postings").fetchone()[0]
+          == len(docs))
+    conn.close()
+T("title_field", t_title_field)
 
 
 # ---------------------------------------------------------------- 6. hostile input

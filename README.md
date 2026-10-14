@@ -194,17 +194,32 @@ mixed scripts included), stopwords are dropped, and postings are stored in a
 `WITHOUT ROWID` SQLite table keyed on `(term, chunk_id)`, so a lookup is a direct
 index seek rather than a scan.
 
-**Ranking.** Classic BM25, computed from the postings list:
+**Ranking.** BM25F over two fields, computed from the postings lists: the chunk's text
+and its document's title field, which is the page title plus the last part of its URL.
+For each query term the two length-normalized frequencies are combined before BM25
+saturates them:
 
 ```
-score(D,Q) = Σ  IDF(t) · ──────tf · (k₁ + 1)───────
-            t∈Q          tf + k₁ · (1 − b + b·|D|/avgdl)
+            tf_text(t)                        tf_title(t)
+f(t) = ────────────────────────  +  w · ─────────────────────────────
+       1 − b + b·|chunk|/avgdl          1 − b + b·|title|/avg_title
+
+score(D,Q) = Σ  IDF(t) · f(t) · (k₁ + 1) / (f(t) + k₁)
+            t∈Q
 
 IDF(t) = ln(1 + (N − df + 0.5) / (df + 0.5))
 ```
 
-`k₁` controls term-frequency saturation, `b` controls length normalization, and both
-are tunable at runtime through `config set`.
+With `w = 0` this is exactly classic BM25. Combining per term means a word counts
+once wherever it matches: a title lifts the page named after the query, and because
+the title field is length-normalized too, the shortest matching name wins. On the
+PyTorch docs, "MaxPool2d" used to return MaxUnpool2d first and now returns
+torch.nn.MaxPool2d. A first attempt that simply added a title bonus let one title word
+outweigh the rest of a query, so "inverted index" ranked `torch.index_select` above a
+page about inverted indexes; the per-term combination is what fixed it.
+
+`k₁` controls term-frequency saturation, `b` controls length normalization, `w` is
+`title_weight`, and all three are tunable at runtime through `config set`.
 
 **Rank fusion.** When one query becomes several, the result lists are merged with
 reciprocal rank fusion, which combines rankings without needing their scores to be
@@ -264,7 +279,7 @@ The parts that took the real work, and the reasoning behind them:
 ## Testing
 
 ```bash
-python tests/test_e2e.py      # 111 checks: the engine and the CLI
+python tests/test_e2e.py      # 118 checks: the engine and the CLI
 python tests/test_server.py   # 50 checks: the HTTP API over real sockets
 ```
 
@@ -274,9 +289,10 @@ in-process, and the crawl tests crawl a throwaway site served from a temporary
 directory on localhost. Neither touches your index or settings.
 
 [`tests/test_e2e.py`](tests/test_e2e.py) covers indexing and re-indexing, BM25
-properties (rare terms outrank common ones, length normalization behaves), chunking
-edge cases including the regression where a misconfigured overlap could stall the
-splitter, Unicode handling, backend resolution across every configuration, LLM
+properties (rare terms outrank common ones, length normalization behaves), the title
+field and its migration, chunking edge cases including the regression where a
+misconfigured overlap could stall the splitter, Unicode handling, backend resolution
+across every configuration, LLM
 fail-open behavior against deliberately malformed model output, CLI-backend failures,
 terminal-escape sanitization against a hostile page, `.env` encoding traps, robots.txt
 rules and the status codes a robots.txt fetch can return, menus kept out of indexed
@@ -317,6 +333,7 @@ python run.py config show
 | `top_k` / `ask_contexts` | `8` / `6` | Results shown, chunks fed to the model |
 | `chunk_chars` / `chunk_overlap` | `1400` / `200` | Chunking granularity |
 | `bm25_k1` / `bm25_b` | `1.5` / `0.75` | Saturation and length normalization |
+| `title_weight` | `5.0` | Weight of the title field (page title and URL name) against the text; `0` is plain BM25 |
 | `crawl_delay` / `http_timeout` | `0.5` / `20` | Crawler politeness |
 | `cli_timeout` / `cli_max_retries` | `240` / `2` | Time limit and API retries for each `claude` CLI call |
 | `snippet_chars`, `web_results`, `user_agent`, `max_answer_tokens` | … | Snippet width, result count, crawler identity, answer budget |

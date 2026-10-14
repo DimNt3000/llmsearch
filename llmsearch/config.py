@@ -30,6 +30,7 @@ DEFAULTS: dict = {
     "chunk_overlap": 200,
     "bm25_k1": 1.5,
     "bm25_b": 0.75,
+    "title_weight": 5.0,            # weight of title/URL-name matches vs body text (0 = off)
     "snippet_chars": 240,
     # Crawler / web settings
     "crawl_delay": 0.5,

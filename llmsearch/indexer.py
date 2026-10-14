@@ -14,6 +14,7 @@ import sqlite3
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 _TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
 
@@ -50,14 +51,61 @@ CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id);
 -- Re-indexing a document cascades from its chunks to their postings; without
 -- this index every deleted chunk scanned the whole postings table.
 CREATE INDEX IF NOT EXISTS idx_postings_chunk ON postings(chunk_id);
+-- The title field: terms of each document's title and URL name.
+CREATE TABLE IF NOT EXISTS title_postings(
+    term   TEXT NOT NULL,
+    doc_id INTEGER NOT NULL REFERENCES docs(id) ON DELETE CASCADE,
+    tf     INTEGER NOT NULL,
+    PRIMARY KEY(term, doc_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_title_postings_doc ON title_postings(doc_id);
 """
+
+# Stored in PRAGMA user_version. 1: documents have a title field.
+_SCHEMA_VERSION = 1
 
 
 def open_db(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(_SCHEMA)
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Bring an index built by an older version up to date, once."""
+    if conn.execute("PRAGMA user_version").fetchone()[0] >= _SCHEMA_VERSION:
+        return
+    conn.execute("BEGIN IMMEDIATE")  # one process migrates; the others wait, then skip
+    try:
+        if conn.execute("PRAGMA user_version").fetchone()[0] < 1:
+            conn.execute("DELETE FROM title_postings")
+            for doc_id, title, url in conn.execute("SELECT id, title, url FROM docs").fetchall():
+                _index_title(conn, doc_id, title, url)
+        conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+
+
+def title_terms(title: str, url: str) -> Counter:
+    """Terms of a document's title field: its title plus the last part of its URL.
+
+    For API documentation the URL often carries the full name that the title
+    shortens: "Conv2d" is the title of both torch.nn.Conv2d.html and
+    torch.ao.nn.qat.Conv2d.html.
+    """
+    name = unquote(urlparse(url).path.rstrip("/").rsplit("/", 1)[-1])
+    return Counter(tokenize(f"{title or ''} {name}"))
+
+
+def _index_title(conn: sqlite3.Connection, doc_id: int, title: str, url: str) -> None:
+    conn.executemany(
+        "INSERT OR REPLACE INTO title_postings(term, doc_id, tf) VALUES (?, ?, ?)",
+        [(term, doc_id, tf) for term, tf in title_terms(title, url).items()],
+    )
 
 
 def tokenize(text: str) -> list[str]:
@@ -104,6 +152,7 @@ def add_document(conn: sqlite3.Connection, url: str, title: str, text: str,
         (url, title or url, source, datetime.now(timezone.utc).isoformat(timespec="seconds")),
     )
     doc_id = cur.lastrowid
+    _index_title(conn, doc_id, title or url, url)
     chunks = chunk_text(text, cfg["chunk_chars"], cfg["chunk_overlap"])
     for seq, chunk in enumerate(chunks):
         tokens = tokenize(chunk)
@@ -120,9 +169,43 @@ def add_document(conn: sqlite3.Connection, url: str, title: str, text: str,
     return len(chunks)
 
 
+def _batches(items: list, size: int = 500):
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
+
+
+def _title_tf(conn: sqlite3.Connection, terms: list[str], b: float) -> dict[str, dict[int, float]]:
+    """Length-normalized title-field frequency of each query term, per document."""
+    n_docs = conn.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
+    total = conn.execute("SELECT COALESCE(SUM(tf), 0) FROM title_postings").fetchone()[0]
+    if not n_docs or not total:
+        return {}
+    rows_by_term = {
+        t: conn.execute("SELECT doc_id, tf FROM title_postings WHERE term = ?", (t,)).fetchall()
+        for t in terms
+    }
+    doc_ids = sorted({doc_id for rows in rows_by_term.values() for doc_id, _ in rows})
+    lengths: dict[int, int] = {}
+    for batch in _batches(doc_ids):
+        lengths.update(conn.execute(
+            f"SELECT doc_id, SUM(tf) FROM title_postings "
+            f"WHERE doc_id IN ({','.join('?' * len(batch))}) GROUP BY doc_id", batch))
+    avg_len = total / n_docs
+    return {t: {doc_id: tf / (1 - b + b * lengths[doc_id] / avg_len) for doc_id, tf in rows}
+            for t, rows in rows_by_term.items() if rows}
+
+
 def search_chunks(conn: sqlite3.Connection, query: str, cfg: dict,
                   limit: int = 50) -> list[dict]:
-    """BM25 over chunks. Returns [{chunk_id, doc_id, score, text, url, title}]."""
+    """BM25F over chunks: the chunk's text plus its document's title field.
+
+    Returns [{chunk_id, doc_id, score, text, url, title}]. For each query term,
+    the chunk's length-normalized frequency and cfg["title_weight"] times the
+    title field's are summed before BM25 saturates them, so a term counts once
+    wherever it matches: a title lifts its page, but one title word cannot
+    outweigh the rest of the query. A title weight of 0 gives plain BM25. A
+    document that matches only in its title contributes its first chunk.
+    """
     terms = list(dict.fromkeys(tokenize(query)))
     if not terms:
         return []
@@ -132,7 +215,8 @@ def search_chunks(conn: sqlite3.Connection, query: str, cfg: dict,
         return []
 
     k1, b = cfg["bm25_k1"], cfg["bm25_b"]
-    scores: dict[int, float] = {}
+    weight = float(cfg.get("title_weight", 5.0))
+    body: dict[str, dict[int, float]] = {}
     doc_of: dict[int, int] = {}
     for term in terms:
         rows = conn.execute(
@@ -140,14 +224,28 @@ def search_chunks(conn: sqlite3.Connection, query: str, cfg: dict,
             "FROM postings p JOIN chunks c ON c.id = p.chunk_id WHERE p.term = ?",
             (term,),
         ).fetchall()
-        df = len(rows)
+        body[term] = {chunk_id: tf / (1 - b + b * length / avgdl)
+                      for chunk_id, tf, length, _ in rows}
+        doc_of.update((chunk_id, doc_id) for chunk_id, _, _, doc_id in rows)
+
+    title = _title_tf(conn, terms, b) if weight > 0 else {}
+    missing = sorted({d for docs in title.values() for d in docs} - set(doc_of.values()))
+    for batch in _batches(missing):
+        doc_of.update(conn.execute(
+            f"SELECT id, doc_id FROM chunks WHERE seq = 0 "
+            f"AND doc_id IN ({','.join('?' * len(batch))})", batch))
+
+    scores: dict[int, float] = {}
+    for term in terms:
+        in_body, in_title = body[term], title.get(term, {})
+        df = len(in_body) or len(in_title)  # a term found only in titles
         if not df:
             continue
         idf = math.log(1 + (n_chunks - df + 0.5) / (df + 0.5))
-        for chunk_id, tf, length, doc_id in rows:
-            denom = tf + k1 * (1 - b + b * length / avgdl)
-            scores[chunk_id] = scores.get(chunk_id, 0.0) + idf * (tf * (k1 + 1)) / denom
-            doc_of[chunk_id] = doc_id
+        for chunk_id, doc_id in doc_of.items():
+            f = in_body.get(chunk_id, 0.0) + weight * in_title.get(doc_id, 0.0)
+            if f:
+                scores[chunk_id] = scores.get(chunk_id, 0.0) + idf * f * (k1 + 1) / (f + k1)
 
     top = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:limit]
     if not top:
