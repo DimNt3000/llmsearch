@@ -19,10 +19,21 @@ import traceback
 from contextlib import closing
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Callable
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from . import __version__, config, crawler, indexer, llm, service, websearch
+
+# Explicit types for the app's web build: the Windows registry, which Python's
+# mimetypes consults, can map .js to text/plain, and browsers refuse to run it.
+_STATIC_TYPES = {
+    ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8", ".json": "application/json",
+    ".webmanifest": "application/manifest+json", ".png": "image/png",
+    ".ico": "image/x-icon", ".svg": "image/svg+xml", ".ttf": "font/ttf",
+    ".woff": "font/woff", ".woff2": "font/woff2", ".map": "application/json",
+}
 
 MAX_BODY_BYTES = 64 * 1024
 MAX_TEXT_CHARS = 1000
@@ -335,7 +346,47 @@ class Handler(BaseHTTPRequestHandler):
         pass  # replaced by the one-line access log in _dispatch
 
     def do_GET(self) -> None:
-        self._dispatch("GET")
+        path = urlparse(self.path).path
+        if self.server.app_dir is not None and not path.startswith("/api"):  # type: ignore[attr-defined]
+            self._serve_app(path)
+        else:
+            self._dispatch("GET")
+
+    def _serve_app(self, url_path: str) -> None:
+        """Serve the app's web build. The app is public; the API behind it is not."""
+        started = time.perf_counter()
+        root: Path = self.server.app_dir  # type: ignore[attr-defined]
+        rel = unquote(url_path).lstrip("/")
+        target = (root / rel).resolve() if rel else root / "index.html"
+        if target.is_dir():
+            target = target / "index.html"
+        if not target.is_relative_to(root):
+            target = None  # .. or an absolute path escaping the app folder
+        elif not target.is_file():
+            # Client-side routes such as /library have no file: serve the app shell.
+            target = None if "." in Path(rel).name else root / "index.html"
+        if target is None or not target.is_file():
+            self._respond(404, _error("not_found", f"No file at {url_path}."))
+            status = 404
+        else:
+            body = target.read_bytes()
+            ctype = _STATIC_TYPES.get(target.suffix.lower(), "application/octet-stream")
+            # Bundles carry a content hash in their name, so they can be cached for good.
+            hashed = url_path.startswith(("/_expo/static/", "/assets/"))
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control",
+                                 "public, max-age=31536000, immutable" if hashed else "no-cache")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                pass
+            status = 200
+        elapsed = (time.perf_counter() - started) * 1000
+        self.server.access_log(f"GET    {url_path[:16]:16} {status}  {elapsed:7.0f} ms")  # type: ignore[attr-defined]
 
     def do_POST(self) -> None:
         self._dispatch("POST")
@@ -443,13 +494,16 @@ class ApiServer(ThreadingHTTPServer):
     allow_reuse_address = sys.platform != "win32"
 
     def __init__(self, address: tuple[str, int], token: str,
-                 log: Callable[[str], None] = print) -> None:
+                 log: Callable[[str], None] = print, app_dir: Path | None = None) -> None:
         super().__init__(address, Handler)
         self.token = token
         self.jobs = CrawlJobs()
         self.access_log = lambda line: log(f"{time.strftime('%H:%M:%S')}  {line}")
+        # The mobile app's web build, served next to the API (an iPhone opens it in Safari).
+        self.app_dir = Path(app_dir).resolve() if app_dir else None
 
 
 def make_server(host: str, port: int, token: str,
-                log: Callable[[str], None] = print) -> ApiServer:
-    return ApiServer((host, port), token, log)
+                log: Callable[[str], None] = print,
+                app_dir: Path | str | None = None) -> ApiServer:
+    return ApiServer((host, port), token, log, Path(app_dir) if app_dir else None)

@@ -123,7 +123,7 @@ from the official Python.org site [3].
 | `ask QUESTION` | Retrieval-augmented answer with `[n]` citations | yes |
 | `summarize QUERY` | Digest of what the top results collectively say | yes |
 | `web QUERY [--ask]` | Live DuckDuckGo search, optionally answered from page content | `--ask` only |
-| `serve [--host] [--port] [--new-token]` | JSON API for the mobile app, see below | for LLM endpoints |
+| `serve [--host] [--port] [--app-dir DIR] [--new-token]` | JSON API for the mobile app, optionally hosting its web build, see below | for LLM endpoints |
 | `stats` / `config` | Index statistics, active backend, and every tunable setting | no |
 
 ## Quickstart
@@ -180,6 +180,14 @@ on: `unauthorized` (401), `bad_request` (400), `no_context` (422), `busy` (409),
 
 The phone and the computer need to share a network. On Windows, allow Python through
 the firewall for private networks the first time the server starts.
+
+**iPhone.** iOS will not install an app from a file the way Android installs an APK,
+so the server can host the app's web build itself: `serve --app-dir DIR` (or the
+`serve_app_dir` setting) serves the files from `npx expo export --platform web` at `/`,
+next to the API. Open the server's network address in Safari and use Share, Add to Home
+Screen; the app then opens full screen with its own icon and finds the server by
+itself, so only the token has to be typed. The app is public, the API behind it still
+requires the token, and paths cannot reach outside the app folder.
 
 ## How it works
 
@@ -280,7 +288,7 @@ The parts that took the real work, and the reasoning behind them:
 
 ```bash
 python tests/test_e2e.py      # 118 checks: the engine and the CLI
-python tests/test_server.py   # 50 checks: the HTTP API over real sockets
+python tests/test_server.py   # 57 checks: the HTTP API over real sockets
 ```
 
 Both harnesses exit non-zero on failure, so they double as CI gates. They make **no
@@ -338,6 +346,7 @@ python run.py config show
 | `cli_timeout` / `cli_max_retries` | `240` / `2` | Time limit and API retries for each `claude` CLI call |
 | `snippet_chars`, `web_results`, `user_agent`, `max_answer_tokens` | … | Snippet width, result count, crawler identity, answer budget |
 | `serve_host` / `serve_port` | `0.0.0.0` / `8765` | Where `llmsearch serve` listens |
+| `serve_app_dir` | empty | Folder with the app's web build to serve at `/`; empty serves only the API |
 
 The index lives in `data/index.db`, overridable with `LLMSEARCH_DATA_DIR`. Deleting
 that file resets the engine; re-crawling a URL replaces its old version in place.

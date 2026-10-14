@@ -350,6 +350,51 @@ def t_concurrency():
 T("concurrency", t_concurrency)
 
 
+# ---------------------------------------------------------------- 8. app hosting
+def t_app():
+    """`serve --app-dir` serves the app's web build next to the API (for iPhones)."""
+    app = SCRATCH / "app"
+    (app / "_expo" / "static" / "js").mkdir(parents=True)
+    (app / "index.html").write_text("<html><body>app shell</body></html>", encoding="utf-8")
+    (app / "_expo" / "static" / "js" / "entry-abc.js").write_text("console.log(1)",
+                                                                   encoding="utf-8")
+    (SCRATCH / "secret.txt").write_text("outside the app folder", encoding="utf-8")
+    srv = server.make_server("127.0.0.1", 0, TOKEN, log=lambda line: None, app_dir=app)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+
+    def get(path: str):
+        try:
+            with urllib.request.urlopen(base + path, timeout=10) as resp:
+                return resp.status, resp.read(), dict(resp.headers)
+        except urllib.error.HTTPError as err:
+            return err.code, err.read(), dict(err.headers)
+
+    try:
+        status, body, hdrs = get("/")
+        check("app: / serves the app shell",
+              status == 200 and b"app shell" in body
+              and hdrs.get("Content-Type", "").startswith("text/html"), f"{status} {hdrs}")
+        status, body, _ = get("/library")
+        check("app: a client-side route gets the app shell", status == 200 and b"app shell" in body)
+        status, _, hdrs = get("/_expo/static/js/entry-abc.js")
+        check("app: bundles are served as JavaScript and cached for good",
+              status == 200 and hdrs.get("Content-Type", "").startswith("text/javascript")
+              and "immutable" in hdrs.get("Cache-Control", ""), f"{status} {hdrs}")
+        check("app: a missing file is a 404, not the app shell", get("/missing.png")[0] == 404)
+        escapes = [get(p)[0] for p in ("/..%2Fsecret.txt", "/%2e%2e/secret.txt",
+                                       "/%2e%2e%2f%2e%2e%2fsecret.txt")]
+        check("app: paths cannot escape the app folder", escapes == [404, 404, 404], str(escapes))
+        check("app: the API beside it still requires the token", get("/api/stats")[0] == 401)
+        status, body, _ = get("/api/health")
+        check("app: the API keeps answering under /api",
+              status == 200 and json.loads(body).get("service") == "llmsearch")
+    finally:
+        srv.shutdown()
+        srv.server_close()
+T("app", t_app)
+
+
 # ---------------------------------------------------------------- summary
 api.shutdown()
 site.shutdown()

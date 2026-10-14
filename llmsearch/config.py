@@ -40,6 +40,7 @@ DEFAULTS: dict = {
     # Server settings (`llmsearch serve`, used by the mobile app)
     "serve_host": "0.0.0.0",
     "serve_port": 8765,
+    "serve_app_dir": "",            # folder with the app's web build to serve at / ("" = API only)
 }
 
 

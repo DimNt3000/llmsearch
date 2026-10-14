@@ -217,9 +217,15 @@ def cmd_serve(args, cfg) -> int:
     host = args.host or cfg["serve_host"]
     port = args.port or cfg["serve_port"]
     token = server.load_or_create_token(rotate=args.new_token)
+    app_dir = args.app_dir or cfg["serve_app_dir"] or None
+    if app_dir and not (Path(app_dir) / "index.html").is_file():
+        _print(f"{C.RED}error:{C.RESET} no index.html in {app_dir}; "
+               f"build the app with `npx expo export --platform web` first")
+        return 1
     try:
         httpd = server.make_server(host, port, token,
-                                   log=lambda s: _print(f"{C.DIM}{s}{C.RESET}"))
+                                   log=lambda s: _print(f"{C.DIM}{s}{C.RESET}"),
+                                   app_dir=app_dir)
     except OSError as exc:
         _print(f"{C.RED}error:{C.RESET} cannot listen on {host}:{port} ({exc.strerror or exc})")
         return 1
@@ -233,6 +239,8 @@ def cmd_serve(args, cfg) -> int:
     elif host not in ("127.0.0.1", "localhost"):
         _print(f"  Network:  http://{host}:{port}")
     _print(f"  Token:    {C.YELLOW}{token}{C.RESET}")
+    if app_dir:
+        _print(f"  App:      served at the same addresses; open one in a phone browser")
     _print(f"\n{C.DIM}The phone must be on the same network. If the app cannot connect,\n"
            f"allow Python through the firewall for private networks. Ctrl+C stops.{C.RESET}\n")
     try:
@@ -347,6 +355,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("serve", help="JSON API for the llmsearch mobile app")
     p.add_argument("--host", help="interface to bind (default: serve_host, 0.0.0.0)")
     p.add_argument("--port", type=int, help="port to listen on (default: serve_port, 8765)")
+    p.add_argument("--app-dir", metavar="DIR",
+                   help="also serve the app's web build from DIR (default: serve_app_dir)")
     p.add_argument("--new-token", action="store_true",
                    help="rotate the access token (re-pair the app afterwards)")
     p.set_defaults(func=cmd_serve)
