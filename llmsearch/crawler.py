@@ -324,15 +324,36 @@ def _prose_only(text: str) -> str:
     return "\n".join(good)
 
 
-def fetch_page_text(url: str, cfg: dict, max_chars: int = 9000) -> dict:
-    """Fetch a single page and return {"url", "title", "text"} (for `web --ask`)."""
+def _drop_repeats(text: str) -> str:
+    """Drop a line that repeats the line before it, as news sites print each
+    headline twice (link text and image caption)."""
+    kept: list[str] = []
+    last = None
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        if line != last:
+            kept.append(line)
+        last = line
+    return "\n".join(kept)
+
+
+def fetch_page_text(url: str, cfg: dict, max_chars: int = 9000,
+                    prose_only: bool = True) -> dict:
+    """Fetch a single page and return {"url", "title", "text"} (for `web --ask`).
+
+    `prose_only` keeps only sentence-like lines, which strips menus from search
+    results; a page the user named is read whole, since its headlines are short.
+    """
     final_url, ctype, body = fetch(url, cfg["user_agent"], cfg["http_timeout"])
     text_raw = decode(body, ctype)
     if ctype.split(";")[0].strip().lower() == "text/plain":
         title, text = url, text_raw
     else:
         title, text, _ = extract(text_raw, final_url)
-        prose = _prose_only(text)
-        if len(prose) >= 400:  # fall back to raw text on sparse pages
-            text = prose
+        if prose_only:
+            prose = _prose_only(text)
+            if len(prose) >= 400:  # fall back to raw text on sparse pages
+                text = prose
+    text = _drop_repeats(text)
     return {"url": final_url, "title": title or final_url, "text": text[:max_chars]}

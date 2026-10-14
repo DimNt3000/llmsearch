@@ -205,7 +205,8 @@ def cmd_web(args, cfg) -> int:
         _print(f"{C.RED}{exc}{C.RESET}")
         return 1
     _print()
-    llm.answer(query, pages, cfg, stream_to=_stream_printer)
+    llm.answer(query, pages, cfg, stream_to=_stream_printer,
+               limit=service.web_source_limit(pages))
     _print()
     _print_source_list(pages)
     return 0

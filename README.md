@@ -81,6 +81,10 @@ The latest stable Python version is **Python 3.14.7**, available for download
 from the official Python.org site [3].
 ```
 
+When the question names a site, such as `"what does sport24.gr lead with right now"`,
+that page is read directly and live instead of searched for, so the answer reflects
+the page as it is at that moment. Only if it cannot be read does the search run.
+
 ## Architecture
 
 ```
@@ -122,7 +126,7 @@ from the official Python.org site [3].
 | `search QUERY --rerank` | Over-fetch, then let the model reorder by relevance | optional |
 | `ask QUESTION` | Retrieval-augmented answer with `[n]` citations | yes |
 | `summarize QUERY` | Digest of what the top results collectively say | yes |
-| `web QUERY [--ask]` | Live DuckDuckGo search, optionally answered from page content | `--ask` only |
+| `web QUERY [--ask]` | Live DuckDuckGo search, optionally answered from page content or from a site the question names | `--ask` only |
 | `serve [--host] [--port] [--app-dir DIR] [--new-token]` | JSON API for the mobile app, optionally hosting its web build, see below | for LLM endpoints |
 | `stats` / `config` | Index statistics, active backend, and every tunable setting | no |
 
@@ -287,7 +291,7 @@ The parts that took the real work, and the reasoning behind them:
 ## Testing
 
 ```bash
-python tests/test_e2e.py      # 123 checks: the engine and the CLI
+python tests/test_e2e.py      # 130 checks: the engine and the CLI
 python tests/test_server.py   # 57 checks: the HTTP API over real sockets
 ```
 
@@ -304,8 +308,9 @@ across every configuration, LLM fail-open behavior against deliberately malforme
 output, CLI-backend failures, terminal-escape sanitization against a hostile page,
 `.env` encoding traps, robots.txt rules and the status codes a robots.txt fetch can
 return, menus kept out of indexed text, crawls scoped to a path prefix, fetching URLs
-with Greek paths and internationalized domain names, exit codes for every subcommand,
-concurrent readers, and packaging consistency.
+with Greek paths and internationalized domain names, sites named in a web question read
+directly, exit codes for every subcommand, concurrent readers, and packaging
+consistency.
 
 [`tests/test_server.py`](tests/test_server.py) starts the real server on an ephemeral
 port and covers token handling, authentication, validation of every input, each error

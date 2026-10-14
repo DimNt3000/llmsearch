@@ -256,14 +256,14 @@ def _format_sources(sources: list[dict], text_key: str, limit: int = 1800) -> st
 
 
 def answer(question: str, sources: list[dict], cfg: dict,
-           stream_to: StreamFn | None = None) -> str:
+           stream_to: StreamFn | None = None, limit: int = 1800) -> str:
     system = (
         "You are the answer engine of a small local search tool. Answer the "
         "user's question using ONLY the numbered sources provided. Cite sources "
         "inline as [n] after each claim. If the sources do not contain the "
         f"answer, say so plainly. Style: {cfg['answer_style']}. No preamble."
     )
-    prompt = f"Question: {question}\n\nSources:\n\n{_format_sources(sources, 'text')}"
+    prompt = f"Question: {question}\n\nSources:\n\n{_format_sources(sources, 'text', limit)}"
     return complete(system, prompt, cfg, stream_to=stream_to)
 
 

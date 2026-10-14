@@ -107,12 +107,42 @@ def web_search(query: str, cfg: dict, n: int | None = None) -> dict:
     return {"query": query, "results": results}
 
 
+WEB_CONTEXT_CHARS = 5400  # page text sent to the model per web answer
+
+
+def web_source_limit(pages: list[dict]) -> int:
+    """Characters of each page the model sees: a fixed budget shared by the
+    pages, so one page read directly is seen in full rather than cut short."""
+    return max(1800, WEB_CONTEXT_CHARS // max(1, len(pages)))
+
+
 def fetch_web_pages(query: str, cfg: dict, n: int | None = None,
                     log: Log | None = None) -> tuple[list[dict], list[str]]:
-    """Search the web, then fetch up to three readable result pages."""
-    results = websearch.ddg_search(query, n or cfg["web_results"], cfg)
+    """Fetch up to three readable pages to answer from.
+
+    Sites named in the question are read directly, live; a search would
+    rarely return a news front page as it is right now. Only when none of
+    them can be read does this search the web and fetch the top results.
+    """
     pages: list[dict] = []
     skipped: list[str] = []
+    for url in websearch.direct_urls(query):
+        try:
+            if log:
+                log(f"reading {url}...")
+            page = crawler.fetch_page_text(url, cfg, prose_only=False)
+            if page["text"].strip():
+                pages.append(page)
+            else:
+                skipped.append(url)
+        except crawler.CrawlError as exc:
+            if log:
+                log(f"  skipped: {exc}")
+            skipped.append(url)
+    if pages:
+        return pages, skipped
+
+    results = websearch.ddg_search(query, n or cfg["web_results"], cfg)
     for r in results[:4]:
         try:
             if log:
@@ -134,7 +164,8 @@ def fetch_web_pages(query: str, cfg: dict, n: int | None = None,
 def web_ask(query: str, cfg: dict, n: int | None = None, log: Log | None = None,
             stream_to: llm.StreamFn | None = None) -> dict:
     pages, skipped = fetch_web_pages(query, cfg, n=n, log=log)
-    answer = llm.answer(query, pages, cfg, stream_to=stream_to)
+    answer = llm.answer(query, pages, cfg, stream_to=stream_to,
+                        limit=web_source_limit(pages))
     return {"query": query, "answer": answer,
             "sources": _sources(pages, text_limit=1200), "skipped": skipped}
 

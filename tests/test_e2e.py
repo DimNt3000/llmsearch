@@ -761,6 +761,80 @@ def t_unicode_urls():
 T("unicode_urls", t_unicode_urls)
 
 
+def t_web_direct():
+    """A site named in a web question is read directly instead of searched for."""
+    from llmsearch import crawler, llm, service, websearch
+
+    found = {q: websearch.direct_urls(q) for q in (
+        "Τι γράφει τώρα το sport24.gr;",
+        "σύγκρινε python.org και https://www.rust-lang.org/learn.",
+        "run run.py with Node.js, e.g. v0.2.0, or mail user@gmail.com",
+        "www.example.xyz/a/b), ok",
+    )}
+    check("direct_urls finds bare domains and URLs, minus trailing punctuation",
+          found["Τι γράφει τώρα το sport24.gr;"] == ["https://sport24.gr"]
+          and found["σύγκρινε python.org και https://www.rust-lang.org/learn."]
+          == ["https://python.org", "https://www.rust-lang.org/learn"]
+          and found["www.example.xyz/a/b), ok"] == ["https://www.example.xyz/a/b"], str(found))
+    check("direct_urls ignores file names, versions, abbreviations, and e-mail",
+          found["run run.py with Node.js, e.g. v0.2.0, or mail user@gmail.com"] == [], str(found))
+
+    headlines = ("<html><head><title>Front page</title></head><body>"
+                 "<h2>Team wins the cup</h2><p>Team wins the cup</p>"
+                 "<h2>Coach signs on</h2></body></html>")
+    real_fetch = crawler.fetch
+    try:
+        crawler.fetch = lambda url, ua, timeout: (url, "text/html", headlines.encode())
+        page = crawler.fetch_page_text("https://news.example/", config.DEFAULTS, prose_only=False)
+    finally:
+        crawler.fetch = real_fetch
+    check("a page read directly keeps short headlines and drops repeated lines",
+          page["text"] == "Team wins the cup\nCoach signs on", repr(page["text"]))
+
+    calls: list[str] = []
+
+    def fake_page(url, cfg, max_chars=9000, prose_only=True):
+        calls.append(f"{url} prose_only={prose_only}")
+        if "down.example.com" in url:
+            raise crawler.CrawlError(f"{url}: connection refused")
+        return {"url": url, "title": url, "text": "x" * 8000}
+
+    def fake_ddg(query, n, cfg):
+        calls.append("ddg")
+        return [{"title": "r", "url": "https://result.example/", "snippet": ""}]
+
+    real_page, real_ddg, real_complete = crawler.fetch_page_text, websearch.ddg_search, llm.complete
+    prompts: list[str] = []
+    try:
+        crawler.fetch_page_text, websearch.ddg_search = fake_page, fake_ddg
+        llm.complete = lambda system, prompt, cfg, **k: prompts.append(prompt) or "ok [1]"
+        res = service.web_ask("what does news.example.com say now?", config.DEFAULTS)
+        direct_calls = list(calls)
+        calls.clear()
+        pages, skipped = service.fetch_web_pages("is down.example.com up?", config.DEFAULTS)
+        fallback_calls = list(calls)
+        calls.clear()
+        service.fetch_web_pages("plain question", config.DEFAULTS)
+        plain_calls = list(calls)
+    finally:
+        crawler.fetch_page_text, websearch.ddg_search = real_page, real_ddg
+        llm.complete = real_complete
+    check("web_ask reads a named site whole and skips the web search",
+          direct_calls == ["https://news.example.com prose_only=False"]
+          and [s["url"] for s in res["sources"]] == ["https://news.example.com"], str(direct_calls))
+    check("one page read directly gets the whole context budget, not 1800 chars",
+          len(prompts) == 1 and "x" * service.WEB_CONTEXT_CHARS in prompts[0]
+          and "x" * (service.WEB_CONTEXT_CHARS + 1) not in prompts[0],
+          str([len(p) for p in prompts]))
+    check("a named site that cannot be read falls back to the web search",
+          fallback_calls[0] == "https://down.example.com prose_only=False" and "ddg" in fallback_calls
+          and skipped == ["https://down.example.com"]
+          and [p["url"] for p in pages] == ["https://result.example/"], str(fallback_calls))
+    check("a question without a site searches the web as before",
+          plain_calls[:2] == ["ddg", "https://result.example/ prose_only=True"], str(plain_calls))
+T("web_direct", t_web_direct)
+
+
 # ---------------------------------------------------------------- 7. packaging
 def t_packaging():
     import llmsearch
