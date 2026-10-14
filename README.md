@@ -287,7 +287,7 @@ The parts that took the real work, and the reasoning behind them:
 ## Testing
 
 ```bash
-python tests/test_e2e.py      # 118 checks: the engine and the CLI
+python tests/test_e2e.py      # 123 checks: the engine and the CLI
 python tests/test_server.py   # 57 checks: the HTTP API over real sockets
 ```
 
@@ -300,12 +300,12 @@ directory on localhost. Neither touches your index or settings.
 properties (rare terms outrank common ones, length normalization behaves), the title
 field and its migration, chunking edge cases including the regression where a
 misconfigured overlap could stall the splitter, Unicode handling, backend resolution
-across every configuration, LLM
-fail-open behavior against deliberately malformed model output, CLI-backend failures,
-terminal-escape sanitization against a hostile page, `.env` encoding traps, robots.txt
-rules and the status codes a robots.txt fetch can return, menus kept out of indexed
-text, crawls scoped to a path prefix, exit codes
-for every subcommand, concurrent readers, and packaging consistency.
+across every configuration, LLM fail-open behavior against deliberately malformed model
+output, CLI-backend failures, terminal-escape sanitization against a hostile page,
+`.env` encoding traps, robots.txt rules and the status codes a robots.txt fetch can
+return, menus kept out of indexed text, crawls scoped to a path prefix, fetching URLs
+with Greek paths and internationalized domain names, exit codes for every subcommand,
+concurrent readers, and packaging consistency.
 
 [`tests/test_server.py`](tests/test_server.py) starts the real server on an ephemeral
 port and covers token handling, authentication, validation of every input, each error

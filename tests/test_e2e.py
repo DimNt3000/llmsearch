@@ -697,6 +697,70 @@ def t_crawl_scope():
 T("crawl_scope", t_crawl_scope)
 
 
+def t_unicode_urls():
+    """URLs with Greek paths or IDN hosts are fetched instead of crashing."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from llmsearch import crawler
+
+    to_ascii = crawler.to_ascii_url
+    check("to_ascii_url percent-encodes a Unicode path and query",
+          to_ascii("https://www.sport24.gr/αθλητικά/?q=ομάδα#τέλος")
+          == "https://www.sport24.gr/%CE%B1%CE%B8%CE%BB%CE%B7%CF%84%CE%B9%CE%BA%CE%AC/"
+             "?q=%CE%BF%CE%BC%CE%AC%CE%B4%CE%B1#%CF%84%CE%AD%CE%BB%CE%BF%CF%82",
+          to_ascii("https://www.sport24.gr/αθλητικά/?q=ομάδα#τέλος"))
+    check("to_ascii_url encodes an IDN host with punycode and keeps the port",
+          to_ascii("http://παράδειγμα.δοκιμή:8080/") == "http://xn--hxajbheg2az3al.xn--jxalpdlp:8080/",
+          to_ascii("http://παράδειγμα.δοκιμή:8080/"))
+    encoded = to_ascii("https://el.wikipedia.org/wiki/Αθήνα?a=1&b=%20")
+    check("to_ascii_url leaves ASCII URLs and existing escapes alone",
+          to_ascii("https://a.example/x%20y?q=1&r=2") == "https://a.example/x%20y?q=1&r=2"
+          and to_ascii(encoded) == encoded and encoded.endswith("?a=1&b=%20"), encoded)
+
+    seen: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append(self.path)
+            body = "plain text page".encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+    try:
+        # Regression: a Greek result URL raised UnicodeEncodeError deep in
+        # http.client, and `web --ask` failed with a 500 instead of answering.
+        try:
+            _, _, body = crawler.fetch(base + "/επικεφαλίδα", "test", 5)
+            ok = body == b"plain text page"
+        except Exception as exc:  # noqa: BLE001 - the check reports any failure
+            ok, body = False, repr(exc)
+        check("fetch requests a Greek path percent-encoded", ok
+              and seen[-1:] == ["/%CE%B5%CF%80%CE%B9%CE%BA%CE%B5%CF%86%CE%B1%CE%BB%CE%AF%CE%B4%CE%B1"],
+              f"{body!r} {seen}")
+        try:
+            crawler.fetch(base + "/a\nb", "test", 5)
+            raised = "nothing"
+        except crawler.CrawlError:
+            raised = "CrawlError"
+        except Exception as exc:  # noqa: BLE001
+            raised = type(exc).__name__
+        check("fetch turns a malformed URL into CrawlError, so callers skip it",
+              raised == "CrawlError", raised)
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+T("unicode_urls", t_unicode_urls)
+
+
 # ---------------------------------------------------------------- 7. packaging
 def t_packaging():
     import llmsearch

@@ -6,6 +6,7 @@ requests. Uses only urllib + html.parser so it has zero dependencies.
 
 from __future__ import annotations
 
+import http.client
 import re
 import time
 import urllib.error
@@ -13,9 +14,11 @@ import urllib.request
 from html import unescape
 from html.parser import HTMLParser
 from typing import Callable, Iterator
-from urllib.parse import urldefrag, urljoin, urlparse
+from urllib.parse import quote, urldefrag, urljoin, urlparse, urlsplit, urlunsplit
 
 MAX_BYTES = 3 * 1024 * 1024  # per-page download cap
+# Reserved and unreserved URL characters plus "%", so encoding is idempotent.
+_URL_SAFE = "!#$%&'()*+,/:;=?@[]~"
 
 # Text inside these is never indexed. Menus and footers are boilerplate that
 # repeats on every page: a documentation sidebar listing the whole API made up
@@ -70,10 +73,33 @@ class _PageParser(HTMLParser):
             self.text_parts.append(data)
 
 
+def to_ascii_url(url: str) -> str:
+    """Encode an IRI as a URI that http.client can send.
+
+    Search results and links carry Unicode (Greek paths, IDN hosts), but a
+    request line must be ASCII. Existing %-escapes are kept as they are.
+    """
+    if url.isascii():
+        return url
+    parts = urlsplit(url)
+    netloc = parts.netloc
+    if not netloc.isascii():
+        userinfo, at, hostport = netloc.rpartition("@")
+        host, colon, port = hostport.partition(":")
+        try:
+            host = host.encode("idna").decode("ascii")
+        except UnicodeError as exc:
+            raise CrawlError(f"{url}: invalid host name") from exc
+        netloc = quote(userinfo, safe=_URL_SAFE) + at + host + colon + port
+    return urlunsplit((parts.scheme, netloc, quote(parts.path, safe=_URL_SAFE),
+                       quote(parts.query, safe=_URL_SAFE),
+                       quote(parts.fragment, safe=_URL_SAFE)))
+
+
 def fetch(url: str, ua: str, timeout: float) -> tuple[str, str, bytes]:
     """GET a URL. Returns (final_url, content_type, decompressed body)."""
     req = urllib.request.Request(
-        url,
+        to_ascii_url(url),
         headers={
             "User-Agent": ua,
             "Accept": "text/html,text/plain,application/xhtml+xml,*/*;q=0.5",
@@ -88,6 +114,9 @@ def fetch(url: str, ua: str, timeout: float) -> tuple[str, str, bytes]:
             body = resp.read(MAX_BYTES)
             encoding = (resp.headers.get("Content-Encoding") or "").lower()
     except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+        raise CrawlError(f"{url}: {exc}") from exc
+    except (http.client.HTTPException, ValueError) as exc:
+        # Malformed URLs or redirect targets (InvalidURL), broken responses.
         raise CrawlError(f"{url}: {exc}") from exc
     return final_url, ctype, _decompress(body, encoding, url)
 
